@@ -40,6 +40,7 @@ try:
     from ..models.paper import Section, StructuredPaper
     from ..models.spatial import SpatialValidatorOutput
     from ..models.voiceover import VoiceoverValidationOutput
+    from .base import prewarm_system_cache
     from .code_validator import CodeValidator
     from .manim_generator import ManimGenerator
     from .render_tester import RenderTester, RenderTestOutput
@@ -50,6 +51,7 @@ try:
     from .voiceover_script_validator import VoiceoverScriptValidator
 except ImportError:
     sys.path.insert(0, str(Path(__file__).parent.parent))
+    from agents.base import prewarm_system_cache
     from agents.code_validator import CodeValidator
     from agents.manim_generator import ManimGenerator
     from agents.render_tester import RenderTester, RenderTestOutput
@@ -298,6 +300,21 @@ async def _with_callback(
     return result
 
 
+async def _prewarm_generator_cache(generator: ManimGenerator, n_candidates: int) -> None:
+    """Warm the generators' shared system-prompt cache before a concurrent burst.
+
+    Concurrent first calls would each WRITE the ~10k-token Manim reference
+    (cache entries only exist once a response begins); one warm-up request makes
+    them all READ it. With a single candidate its own call warms the cache.
+    Best-effort: prewarm_system_cache never raises and is a no-op off Anthropic.
+    """
+    if n_candidates < 2:
+        return
+    await prewarm_system_cache(
+        getattr(generator, "stable_system_prompt", ""), getattr(generator, "model", None)
+    )
+
+
 @observe(name="generate-visualizations", capture_input=False)
 async def generate_visualizations(
     paper: StructuredPaper,
@@ -367,6 +384,7 @@ async def generate_visualizations(
     logger.info("STEP 2-7: Planning, generating, and quality validation")
 
     if CONCURRENT_GENERATION:
+        await _prewarm_generator_cache(generator, len(candidates))
         tasks = [
             _with_callback(
                 generate_single_visualization(
@@ -757,6 +775,7 @@ async def generate_visual_aids(
     if not candidates:
         return []
 
+    await _prewarm_generator_cache(generator, len(candidates))
     outcomes = await asyncio.gather(
         *(
             _with_callback(
