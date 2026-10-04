@@ -94,10 +94,12 @@ ENABLE_VISUAL_AIDS                # env: "1"/"true" enables silent visual aids (
 VISUAL_AIDS_PER_SECTION           # env: default 3
 MAX_VISUAL_AIDS                   # env: default 15 per paper
 VISUAL_AID_RENDER_QUALITY         # env: "low" (default) | "medium" | "high"
-VISUAL_NARRATION                  # env: "1"/"true" makes narrated videos DRAW 3 named quantities (default off; planner + generator prompt blocks)
+VISUAL_NARRATION                  # env: "1"/"true" makes narrated videos DRAW 3 named quantities (default off; planner + generator prompt blocks; recommended)
 ```
 
 ## LLM Provider Layer (`agents/base.py`)
+
+**Claude caching:** the Manim generator's system prompt goes out as two blocks, a stable cached reference and an uncached per-plan live-docs suffix (`system_suffix`), and the pipeline pre-warms the cache once (`prewarm_system_cache`, `max_tokens=0`) before concurrent generation. Without the split, every concept had a unique prefix: one ResNet run wrote 180k cache tokens and read only 20k.
 
 Every agent call routes through `call_llm` / `call_llm_sync`, which resolve a provider from the environment: **Azure OpenAI is the primary** (set `AZURE_OPENAI_API_KEY` + `AZURE_OPENAI_ENDPOINT`, or force with `LLM_PROVIDER=azure`). Details that matter:
 
