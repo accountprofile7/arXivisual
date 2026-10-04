@@ -1,4 +1,4 @@
-"""Base agent class with provider-switchable LLM support (Azure OpenAI / Dedalus)."""
+"""Base agent class with provider-switchable LLM support (Azure OpenAI / Claude / Dedalus)."""
 
 import json
 import logging
@@ -41,21 +41,26 @@ def _detect_provider() -> str:
     if explicit == "azure":
         _require_azure_env()
         return "azure"
+    if explicit == "anthropic":
+        _require_anthropic_env()
+        return "anthropic"
     if explicit == "dedalus":
         _require_dedalus_env()
         return "dedalus"
     if explicit:
         raise RuntimeError(
-            f"Unknown LLM_PROVIDER={explicit!r}. Use 'azure' or 'dedalus'."
+            f"Unknown LLM_PROVIDER={explicit!r}. Use 'azure', 'anthropic' or 'dedalus'."
         )
 
     if os.environ.get("AZURE_OPENAI_API_KEY") and os.environ.get("AZURE_OPENAI_ENDPOINT"):
         return "azure"
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return "anthropic"
     if os.environ.get("DEDALUS_API_KEY"):
         return "dedalus"
     raise RuntimeError(
         "No LLM provider configured. Set AZURE_OPENAI_API_KEY + AZURE_OPENAI_ENDPOINT "
-        "(Azure OpenAI, GPT-5 family) or DEDALUS_API_KEY (Dedalus)."
+        "(Azure OpenAI, GPT-5 family), ANTHROPIC_API_KEY (Claude) or DEDALUS_API_KEY (Dedalus)."
     )
 
 
@@ -66,6 +71,11 @@ def _require_azure_env() -> None:
     ]
     if missing:
         raise RuntimeError(f"LLM_PROVIDER=azure but missing env vars: {', '.join(missing)}")
+
+
+def _require_anthropic_env() -> None:
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        raise RuntimeError("LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY is not set.")
 
 
 def _require_dedalus_env() -> None:
@@ -172,6 +182,96 @@ def _azure_request_kwargs(
 
 
 # ---------------------------------------------------------------------------
+# Anthropic (Claude) — official SDK, credentials from ANTHROPIC_API_KEY
+# ---------------------------------------------------------------------------
+
+DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5-5"
+_ANTHROPIC_FALLBACKS_BETA = "server-side-fallback-2026-07-01"
+# Adaptive thinking counts against max_tokens on Claude; agents size max_tokens
+# for the visible answer, so add room to think (cf. _AZURE_REASONING_HEADROOM).
+_ANTHROPIC_THINKING_HEADROOM = 8000
+_ANTHROPIC_JSON_INSTRUCTION = (
+    "\n\nRespond with only a single valid JSON object, no prose, no code fences."
+)
+
+_anthropic_async_client = None
+_anthropic_sync_client = None
+
+
+def _anthropic_model() -> str:
+    return os.environ.get("ANTHROPIC_MODEL") or DEFAULT_ANTHROPIC_MODEL
+
+
+def _anthropic_model_for(model: str | None) -> str:
+    """Requested model -> Claude model id. Empty and non-Claude (e.g. GPT)
+    names map to the configured Claude model; explicit claude-* names pass through."""
+    if model and model.startswith("claude"):
+        return model
+    return _anthropic_model()
+
+
+def _get_anthropic_client():
+    global _anthropic_async_client  # noqa: PLW0603 — lazy singleton cache
+    if _anthropic_async_client is None:
+        import anthropic
+        _anthropic_async_client = anthropic.AsyncAnthropic(timeout=300.0)
+    return _anthropic_async_client
+
+
+def _get_anthropic_sync_client():
+    global _anthropic_sync_client  # noqa: PLW0603 — lazy singleton cache
+    if _anthropic_sync_client is None:
+        import anthropic
+        _anthropic_sync_client = anthropic.Anthropic(timeout=300.0)
+    return _anthropic_sync_client
+
+
+def _anthropic_request_kwargs(
+    model: str, prompt: str, system_prompt: str, max_tokens: int, json_mode: bool = False
+) -> dict:
+    if json_mode:
+        # Claude has no schema-free JSON mode; call_llm_json's repair+retry backs this up.
+        prompt += _ANTHROPIC_JSON_INSTRUCTION
+    kwargs: dict = {
+        "model": model,
+        "max_tokens": max_tokens + _ANTHROPIC_THINKING_HEADROOM,
+        "messages": [{"role": "user", "content": prompt}],
+        "betas": [_ANTHROPIC_FALLBACKS_BETA],
+        "fallbacks": "default",
+        # `thinking` is deliberately omitted (adaptive; Sonnet 5.5 rejects "disabled"),
+        # as are temperature/top_p/top_k and assistant prefill.
+        "output_config": {"effort": os.environ.get("ANTHROPIC_EFFORT", "medium")},
+    }
+    if system_prompt:
+        # The large Manim reference is re-sent on every generation call: cache it.
+        kwargs["system"] = [
+            {"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}
+        ]
+    return kwargs
+
+
+def _anthropic_output(msg, model: str, elapsed: float) -> str:
+    """Text of a final Anthropic message (skips thinking/fallback blocks)."""
+    if msg.stop_reason == "refusal":
+        details = getattr(msg, "stop_details", None)
+        category = getattr(details, "category", None) or "unspecified"
+        raise RuntimeError(f"Claude refused the request (category: {category})")
+    if msg.stop_reason == "max_tokens":
+        logger.warning(f"[LLM] anthropic/{model} hit max_tokens; output may be truncated")
+    output = "".join(
+        b.text for b in msg.content if getattr(b, "type", None) == "text"
+    )
+    u = getattr(msg, "usage", None)
+    logger.info(
+        f"[LLM] anthropic/{model} responded in {elapsed:.1f}s ({len(output.split())} output words; "
+        f"in={getattr(u, 'input_tokens', None)} out={getattr(u, 'output_tokens', None)} "
+        f"cache_read={getattr(u, 'cache_read_input_tokens', None)} "
+        f"cache_write={getattr(u, 'cache_creation_input_tokens', None)})"
+    )
+    return output
+
+
+# ---------------------------------------------------------------------------
 # Dedalus (legacy fallback)
 # ---------------------------------------------------------------------------
 
@@ -208,6 +308,8 @@ def get_model_name(model: str | None = None) -> str:
         return model
     if get_provider() == "azure":
         return _azure_deployment()
+    if get_provider() == "anthropic":
+        return _anthropic_model()
     return DEFAULT_DEDALUS_MODEL
 
 
@@ -256,6 +358,21 @@ async def call_llm(
             logger.error(f"[LLM] azure/{resolved} FAILED after {elapsed:.1f}s: {type(e).__name__}: {e}")
             raise
 
+    if provider == "anthropic":
+        resolved = _anthropic_model_for(model)
+        logger.info(f"[LLM] Calling anthropic/{resolved} ({input_words} input words, max_tokens={max_tokens})")
+        try:
+            client = _get_anthropic_client()
+            kw = _anthropic_request_kwargs(resolved, prompt, system_prompt, max_tokens, json_mode)
+            # Streaming avoids HTTP timeouts on long generations.
+            async with client.beta.messages.stream(**kw) as stream:
+                msg = await stream.get_final_message()
+            return _anthropic_output(msg, resolved, time.monotonic() - t0)
+        except Exception as e:
+            elapsed = time.monotonic() - t0
+            logger.error(f"[LLM] anthropic/{resolved} FAILED after {elapsed:.1f}s: {type(e).__name__}: {e}")
+            raise
+
     dedalus_model = _dedalus_model(model or DEFAULT_DEDALUS_MODEL)
     if json_mode:
         logger.warning("[LLM] json_mode requested but the Dedalus provider cannot enforce it; relying on the prompt")
@@ -299,6 +416,18 @@ def call_llm_sync(
             )
         )
         return resp.choices[0].message.content or ""
+    if provider == "anthropic":
+        resolved = _anthropic_model_for(model)
+        t0 = time.monotonic()
+        try:
+            client = _get_anthropic_sync_client()
+            kw = _anthropic_request_kwargs(resolved, prompt, system_prompt, max_tokens, json_mode)
+            with client.beta.messages.stream(**kw) as stream:
+                msg = stream.get_final_message()
+            return _anthropic_output(msg, resolved, time.monotonic() - t0)
+        except Exception as e:
+            logger.error(f"[LLM] anthropic/{resolved} FAILED after {time.monotonic() - t0:.1f}s: {type(e).__name__}: {e}")
+            raise
     if json_mode:
         logger.warning("[LLM] json_mode requested but the Dedalus provider cannot enforce it; relying on the prompt")
 
@@ -388,8 +517,8 @@ class BaseAgent:
     """
     Base class for all AI agents in the pipeline.
 
-    Provider is selected via env: Azure OpenAI (AZURE_OPENAI_*) or
-    Dedalus (DEDALUS_API_KEY). See _detect_provider().
+    Provider is selected via env: Azure OpenAI (AZURE_OPENAI_*),
+    Claude (ANTHROPIC_API_KEY) or Dedalus (DEDALUS_API_KEY). See _detect_provider().
     """
 
     def __init__(
@@ -415,6 +544,8 @@ class BaseAgent:
         # Log active provider
         if self._provider == "azure":
             print(f"☁️  Azure OpenAI → {_azure_model(self.model)}")
+        elif self._provider == "anthropic":
+            print(f"🧠 Anthropic → {_anthropic_model_for(self.model)}")
         else:
             print(f"🔮 Dedalus SDK → anthropic/{self.model}")
 

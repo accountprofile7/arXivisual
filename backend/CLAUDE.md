@@ -18,7 +18,7 @@ POST /api/process  (api/routes.py: rate-limit + dedupe [api/throttle.py] + stale
   Postgres via async SQLAlchemy (db/) ← frontend polls GET /api/status/{job_id}
 ```
 
-- **LLM**: Azure OpenAI GPT-5 family, provider-switchable via `agents/base.py` (Dedalus = legacy fallback).
+- **LLM**: Azure OpenAI GPT-5 family, provider-switchable via `agents/base.py` (Claude via the `anthropic` SDK is the second provider; Dedalus = legacy fallback).
 - **TTS**: Azure OpenAI `gpt-4o-mini-tts` as manim-voiceover `OpenAIService`; env routed to Azure's
   OpenAI-compatible endpoint at render time by `rendering/local_runner.py:_tts_subprocess_env`.
 - **Rendering**: local subprocess (`RENDER_MODE=local`, the default and what prod runs). Modal exists
@@ -87,7 +87,8 @@ npm/pip audit (advisory). `evals.yml` — nightly 06:00 UTC golden-set evals, fa
 
 ## Env vars (\* = secret; template: `.env.example`)
 
-- `AZURE_OPENAI_API_KEY`\*, `AZURE_OPENAI_ENDPOINT` — primary provider (auto-detected; `LLM_PROVIDER=azure|dedalus` forces).
+- `AZURE_OPENAI_API_KEY`\*, `AZURE_OPENAI_ENDPOINT` — primary provider (auto-detected; `LLM_PROVIDER=azure|anthropic|dedalus` forces; auto order azure, anthropic, dedalus).
+- `ANTHROPIC_API_KEY`\* — Claude provider, used when Azure is not configured. `ANTHROPIC_MODEL` (default `claude-sonnet-5-5`), `ANTHROPIC_EFFORT` (default `medium`).
 - `AZURE_OPENAI_DEPLOYMENT` (default `gpt-5`), `AZURE_OPENAI_REASONING_EFFORT` (default `low`).
 - `DEDALUS_API_KEY`\* — legacy fallback provider (also powers optional Context7 docs via `agents/context7_docs.py`).
 - `DATABASE_URL`\* — Postgres; `postgres://` is auto-rewritten to `postgresql+asyncpg://`. Unset = SQLite.

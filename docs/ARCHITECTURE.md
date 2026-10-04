@@ -104,6 +104,8 @@ Every agent call routes through `call_llm` / `call_llm_sync`, which resolve a pr
 - GPT-5 reasoning tokens count against `max_completion_tokens`, so each request adds 4096 tokens of headroom above the agent's visible-answer budget; `AZURE_OPENAI_REASONING_EFFORT` (default `low`) trades depth for speed and cost.
 - Prompt templates are formatted with `str.replace`, not `str.format` — paper text is full of LaTeX braces.
 
+**Claude (Anthropic)** is the second provider (`ANTHROPIC_API_KEY`, or force with `LLM_PROVIDER=anthropic`); auto-detect order is Azure, then Anthropic, then Dedalus. It uses the official `anthropic` SDK on the beta messages surface with streaming (no HTTP timeouts on long generations), the `server-side-fallback-2026-07-01` beta with `fallbacks="default"`, an ephemeral `cache_control` on the system prompt (the 17KB Manim reference), adaptive thinking (not sent; `max_tokens` gets 8000 tokens of headroom), `ANTHROPIC_EFFORT` (default `medium`) and `ANTHROPIC_MODEL` (default `claude-sonnet-5-5`). JSON mode is prompt-only (plus the shared repair and retry). Visual QA's vision path stays Azure-only.
+
 A Dedalus Labs provider remains selectable as a legacy fallback (`DEDALUS_API_KEY`). Historical footnote: `agents/dedalus_base.py` (multi-model handoff chains) and `agents/voiceover_generator.py` (a post-hoc voiceover transform, superseded by unified generation and disabled by default) are legacy code from that era, slated for removal.
 
 ## Voiceover / TTS
