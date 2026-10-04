@@ -14,7 +14,7 @@ def _utcnow_naive() -> datetime:
     must stay naive; this just replaces the deprecated _utcnow_naive()."""
     return datetime.now(UTC).replace(tzinfo=None)
 
-from sqlalchemy import delete, distinct, func, select, update
+from sqlalchemy import delete, distinct, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -313,7 +313,12 @@ async def list_paper_summaries(db: AsyncSession, active_job_max_age_hours: float
             Visualization.paper_id.label("paper_id"),
             func.count(distinct(Visualization.section_id)).label("n"),
         )
-        .where(Visualization.status == "complete", Visualization.video_url.isnot(None))
+        .where(
+            Visualization.status == "complete",
+            Visualization.video_url.isnot(None),
+            # Silent visual aids decorate a paper; they don't make it "ready".
+            or_(Visualization.kind.is_(None), Visualization.kind != "visual_aid"),
+        )
         .group_by(Visualization.paper_id)
         .subquery()
     )
