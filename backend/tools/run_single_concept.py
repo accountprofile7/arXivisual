@@ -58,9 +58,17 @@ class UsageCollector(logging.Handler):
         return sum(t[k] * PRICE_PER_MTOK[k] / 1_000_000 for k in PRICE_PER_MTOK)
 
     def summary(self) -> str:
+        on_subscription = os.environ.get("LLM_PROVIDER", "").strip().lower() == "claude_cli"
         if not self.calls:
+            if on_subscription:
+                return "subscription (no API cost); token usage: n/a"
             return "no [LLM] usage lines captured (provider may not report usage; cost unknown)"
         t = self.totals()
+        if on_subscription:
+            return (
+                f"subscription (no API cost); token usage: {len(self.calls)} LLM calls: "
+                f"in={t['in']} out={t['out']} cache_read={t['cache_read']} cache_write={t['cache_write']}"
+            )
         return (
             f"{len(self.calls)} LLM calls: in={t['in']} out={t['out']} "
             f"cache_read={t['cache_read']} cache_write={t['cache_write']} "

@@ -1,10 +1,14 @@
-"""Base agent class with provider-switchable LLM support (Azure OpenAI / Claude / Dedalus)."""
+"""Base agent class with provider-switchable LLM support (Azure OpenAI / Claude / Claude CLI / Dedalus)."""
 
 import json
 import logging
 import os
 import re
+import shutil
+import subprocess
+import tempfile
 import time
+import weakref
 from pathlib import Path
 from typing import Any
 
@@ -43,9 +47,12 @@ def _detect_provider() -> str:
     if explicit == "dedalus":
         _require_dedalus_env()
         return "dedalus"
+    if explicit == "claude_cli":
+        _require_claude_cli_env()
+        return "claude_cli"
     if explicit:
         raise RuntimeError(
-            f"Unknown LLM_PROVIDER={explicit!r}. Use 'azure', 'anthropic' or 'dedalus'."
+            f"Unknown LLM_PROVIDER={explicit!r}. Use 'azure', 'anthropic', 'dedalus' or 'claude_cli'."
         )
 
     if os.environ.get("AZURE_OPENAI_API_KEY") and os.environ.get("AZURE_OPENAI_ENDPOINT"):
@@ -77,6 +84,25 @@ def _require_anthropic_env() -> None:
 def _require_dedalus_env() -> None:
     if not os.environ.get("DEDALUS_API_KEY"):
         raise RuntimeError("LLM_PROVIDER=dedalus but DEDALUS_API_KEY is not set.")
+
+
+def _require_claude_cli_env() -> None:
+    """claude_cli is LOCAL-ONLY and opt-in: refuse anywhere it could bill or leak."""
+    if os.environ.get("ENVIRONMENT", "").strip().lower() == "production":
+        raise RuntimeError(
+            "LLM_PROVIDER=claude_cli is local-only (it uses a personal Claude subscription) "
+            "and is refused when ENVIRONMENT=production."
+        )
+    if os.environ.get("AZURE_OPENAI_API_KEY") and os.environ.get("AZURE_OPENAI_ENDPOINT"):
+        raise RuntimeError(
+            "LLM_PROVIDER=claude_cli refused: Azure OpenAI is fully configured, which looks "
+            "like a deployed environment. Unset AZURE_OPENAI_* or use LLM_PROVIDER=azure."
+        )
+    if not _claude_cli_executable():
+        raise RuntimeError(
+            "LLM_PROVIDER=claude_cli but the `claude` executable was not found on PATH. "
+            "Install Claude Code and log in with your subscription."
+        )
 
 
 def get_provider() -> str:
@@ -287,6 +313,225 @@ def _anthropic_output(msg, model: str, elapsed: float) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Claude Code CLI (`claude -p`) — LOCAL ONLY, billed to a Claude subscription
+# ---------------------------------------------------------------------------
+
+_CLAUDE_CLI_DEFAULT_CONCURRENCY = 2
+_CLAUDE_CLI_DEFAULT_TIMEOUT_SECONDS = 600.0
+# The CLI has no --system-prompt-file, and Windows command lines cap near 32k chars
+# (the Manim system prompt is 17KB+docs), so the real system prompt travels on STDIN
+# in a tagged block and --system-prompt only points at it.
+_CLAUDE_CLI_SYSTEM_PROMPT = (
+    "You are a precise assistant behind an API. If the user message contains a "
+    "<system_instructions> block, treat it as your system prompt and follow it exactly. "
+    "Reply with only what is asked for. You have no tools."
+)
+# Kept despite matching the *TOKEN* scrub: the subscription credential from `claude setup-token`.
+_CLAUDE_CLI_ENV_KEEP = frozenset({"CLAUDE_CODE_OAUTH_TOKEN"})
+_CLAUDE_CLI_ENV_PREFIXES = (
+    "ANTHROPIC_", "AZURE_", "S3_", "LANGFUSE_", "DEDALUS_", "OPENAI_", "CONTEXT7_", "ELEVENLABS_",
+)
+_CLAUDE_CLI_ENV_SUBSTRINGS = ("SECRET", "TOKEN", "PASSWORD", "API_KEY", "CREDENTIAL")
+_CLAUDE_CLI_ENV_EXACT = frozenset({"DATABASE_URL"})
+
+_claude_cli_semaphores: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+
+
+def _claude_cli_executable() -> str | None:
+    """Path of the `claude` launcher (shutil.which honours PATHEXT: claude.exe/.cmd)."""
+    return shutil.which("claude")
+
+
+def _claude_cli_model() -> str:
+    return os.environ.get("ANTHROPIC_MODEL") or DEFAULT_ANTHROPIC_MODEL
+
+
+def _claude_cli_env() -> dict[str, str]:
+    """os.environ minus every credential: with ANTHROPIC_API_KEY/AUTH_TOKEN present
+    the CLI would bill the API instead of the subscription, and the child needs
+    none of the app's secrets."""
+    env: dict[str, str] = {}
+    for key, value in os.environ.items():
+        upper = key.upper()
+        if upper in _CLAUDE_CLI_ENV_KEEP:
+            env[key] = value
+        elif (
+            upper in _CLAUDE_CLI_ENV_EXACT
+            or upper.startswith(_CLAUDE_CLI_ENV_PREFIXES)
+            or any(frag in upper for frag in _CLAUDE_CLI_ENV_SUBSTRINGS)
+        ):
+            continue
+        else:
+            env[key] = value
+    return env
+
+
+def _claude_cli_timeout() -> float:
+    try:
+        return float(os.environ.get("CLAUDE_CLI_TIMEOUT_SECONDS", ""))
+    except ValueError:
+        return _CLAUDE_CLI_DEFAULT_TIMEOUT_SECONDS
+
+
+def _claude_cli_semaphore():
+    """One semaphore per running loop (a single module-level one breaks across asyncio.run calls)."""
+    import asyncio
+
+    loop = asyncio.get_running_loop()
+    sem = _claude_cli_semaphores.get(loop)
+    if sem is None:
+        try:
+            limit = int(os.environ.get("CLAUDE_CLI_CONCURRENCY", ""))
+        except ValueError:
+            limit = _CLAUDE_CLI_DEFAULT_CONCURRENCY
+        sem = asyncio.Semaphore(max(1, limit))
+        _claude_cli_semaphores[loop] = sem
+    return sem
+
+
+def _claude_cli_command(exe: str, model: str) -> list[str]:
+    """argv for one headless call (no shell). The prompt is NOT in it; it goes to stdin.
+
+    --bare is deliberately not used: it disables OAuth/keychain, i.e. subscription auth.
+    Isolation instead: --safe-mode (no CLAUDE.md, hooks, plugins, skills, MCP), project-only
+    setting sources run from an EMPTY temp cwd (so user/project settings contribute nothing),
+    --tools "" (no tools), --strict-mcp-config with no --mcp-config (no MCP servers)."""
+    return [
+        exe, "-p",
+        "--output-format", "json",
+        "--model", model,
+        "--effort", os.environ.get("ANTHROPIC_EFFORT") or "medium",
+        "--tools", "",
+        "--strict-mcp-config",
+        "--no-session-persistence",
+        "--safe-mode",
+        "--setting-sources", "project",
+        "--system-prompt", _CLAUDE_CLI_SYSTEM_PROMPT,
+    ]
+
+
+def _claude_cli_stdin(prompt: str, system_prompt: str, system_suffix: str, json_mode: bool) -> bytes:
+    if json_mode:
+        prompt += _ANTHROPIC_JSON_INSTRUCTION
+    system = system_prompt + system_suffix
+    if system:
+        prompt = f"<system_instructions>\n{system}\n</system_instructions>\n\n{prompt}"
+    return prompt.encode("utf-8")
+
+
+def _claude_cli_tail(data: bytes | str | None, limit: int = 500) -> str:
+    if isinstance(data, bytes):
+        data = data.decode("utf-8", errors="replace")
+    return (data or "").strip()[-limit:]
+
+
+def _claude_cli_parse(returncode: int | None, stdout: bytes, stderr: bytes) -> tuple[str, dict]:
+    """(result text, usage dict) from the CLI's --output-format json; raises RuntimeError."""
+    err = _claude_cli_tail(stderr)
+    if returncode:
+        raise RuntimeError(
+            f"claude CLI exited with code {returncode}: {err or _claude_cli_tail(stdout)}"
+        )
+    try:
+        data = json.loads(stdout.decode("utf-8", errors="replace"))
+    except ValueError as e:
+        raise RuntimeError(
+            f"claude CLI returned unparseable output ({e}); stderr: {err}; "
+            f"stdout tail: {_claude_cli_tail(stdout, 200)}"
+        ) from e
+    if isinstance(data, list):  # some versions emit the whole message array
+        data = next(
+            (d for d in reversed(data) if isinstance(d, dict) and d.get("type") == "result"), None
+        )
+    if not isinstance(data, dict) or "result" not in data:
+        raise RuntimeError(f"claude CLI JSON has no result field; stderr: {err}")
+    if data.get("is_error"):
+        raise RuntimeError(f"claude CLI reported an error: {_claude_cli_tail(str(data['result']))}; {err}")
+    usage = data.get("usage")
+    return str(data["result"] or ""), usage if isinstance(usage, dict) else {}
+
+
+def _claude_cli_log_response(model: str, output: str, usage: dict, elapsed: float) -> None:
+    if usage:
+        usage_txt = (
+            f"in={usage.get('input_tokens')} out={usage.get('output_tokens')} "
+            f"cache_read={usage.get('cache_read_input_tokens')} "
+            f"cache_write={usage.get('cache_creation_input_tokens')}"
+        )
+    else:
+        usage_txt = "usage n/a"
+    logger.info(
+        f"[LLM] claude_cli/{model} responded in {elapsed:.1f}s "
+        f"({len(output.split())} output words; {usage_txt})"
+    )
+
+
+def _claude_cli_prepare(prompt: str, system_prompt: str, system_suffix: str, json_mode: bool):
+    exe = _claude_cli_executable()
+    if not exe:
+        raise RuntimeError("claude executable not found on PATH")
+    model = _claude_cli_model()
+    logger.info(
+        f"[LLM] Calling claude_cli/{model} ({len(prompt.split())} input words, "
+        f"max_tokens not enforced by the CLI)"
+    )
+    return (
+        model,
+        _claude_cli_command(exe, model),
+        _claude_cli_stdin(prompt, system_prompt, system_suffix, json_mode),
+        _claude_cli_timeout(),
+    )
+
+
+async def _claude_cli_call_async(
+    prompt: str, system_prompt: str, system_suffix: str, json_mode: bool
+) -> str:
+    import asyncio
+
+    model, argv, stdin, timeout = _claude_cli_prepare(prompt, system_prompt, system_suffix, json_mode)
+    async with _claude_cli_semaphore():
+        t0 = time.monotonic()
+        with tempfile.TemporaryDirectory(prefix="claude_cli_") as cwd:
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=cwd,
+                env=_claude_cli_env(),
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(stdin), timeout)
+            except TimeoutError:
+                raise RuntimeError(f"claude CLI timed out after {timeout:.0f}s (killed)") from None
+            finally:
+                if proc.returncode is None:
+                    proc.kill()
+                    await proc.wait()
+        output, usage = _claude_cli_parse(proc.returncode, stdout, stderr)
+    _claude_cli_log_response(model, output, usage, time.monotonic() - t0)
+    return output
+
+
+def _claude_cli_call_sync(
+    prompt: str, system_prompt: str, system_suffix: str, json_mode: bool
+) -> str:
+    model, argv, stdin, timeout = _claude_cli_prepare(prompt, system_prompt, system_suffix, json_mode)
+    t0 = time.monotonic()
+    with tempfile.TemporaryDirectory(prefix="claude_cli_") as cwd:
+        try:
+            proc = subprocess.run(
+                argv, input=stdin, capture_output=True, cwd=cwd,
+                env=_claude_cli_env(), timeout=timeout, check=False,
+            )
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"claude CLI timed out after {timeout:.0f}s (killed)") from None
+    output, usage = _claude_cli_parse(proc.returncode, proc.stdout, proc.stderr)
+    _claude_cli_log_response(model, output, usage, time.monotonic() - t0)
+    return output
+
+
+# ---------------------------------------------------------------------------
 # Dedalus (legacy fallback)
 # ---------------------------------------------------------------------------
 
@@ -323,8 +568,11 @@ def get_model_name(model: str | None = None) -> str:
         return model
     if get_provider() == "azure":
         return _azure_deployment()
-    if get_provider() == "anthropic":
+    provider = get_provider()
+    if provider == "anthropic":
         return _anthropic_model()
+    if provider == "claude_cli":
+        return _claude_cli_model()
     return DEFAULT_DEDALUS_MODEL
 
 
@@ -396,6 +644,14 @@ async def call_llm(
             logger.error(f"[LLM] anthropic/{resolved} FAILED after {elapsed:.1f}s: {type(e).__name__}: {e}")
             raise
 
+    if provider == "claude_cli":
+        try:
+            return await _claude_cli_call_async(prompt, system_prompt, system_suffix, json_mode)
+        except Exception as e:
+            elapsed = time.monotonic() - t0
+            logger.error(f"[LLM] claude_cli/{_claude_cli_model()} FAILED after {elapsed:.1f}s: {type(e).__name__}: {e}")
+            raise
+
     dedalus_model = _dedalus_model(model or DEFAULT_DEDALUS_MODEL)
     if json_mode:
         logger.warning("[LLM] json_mode requested but the Dedalus provider cannot enforce it; relying on the prompt")
@@ -455,6 +711,13 @@ def call_llm_sync(
             return _anthropic_output(msg, resolved, time.monotonic() - t0)
         except Exception as e:
             logger.error(f"[LLM] anthropic/{resolved} FAILED after {time.monotonic() - t0:.1f}s: {type(e).__name__}: {e}")
+            raise
+    if provider == "claude_cli":
+        t0 = time.monotonic()
+        try:
+            return _claude_cli_call_sync(prompt, system_prompt, system_suffix, json_mode)
+        except Exception as e:
+            logger.error(f"[LLM] claude_cli/{_claude_cli_model()} FAILED after {time.monotonic() - t0:.1f}s: {type(e).__name__}: {e}")
             raise
     if json_mode:
         logger.warning("[LLM] json_mode requested but the Dedalus provider cannot enforce it; relying on the prompt")
@@ -607,6 +870,8 @@ class BaseAgent:
             print(f"☁️  Azure OpenAI → {_azure_model(self.model)}")
         elif self._provider == "anthropic":
             print(f"🧠 Anthropic → {_anthropic_model_for(self.model)}")
+        elif self._provider == "claude_cli":
+            print(f"🖥️  Claude CLI (subscription, local only) → {_claude_cli_model()}")
         else:
             print(f"🔮 Dedalus SDK → anthropic/{self.model}")
 
