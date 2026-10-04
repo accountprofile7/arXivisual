@@ -54,6 +54,7 @@ export interface SectionResponse {
   equations: string[];
   video_url?: string;
   videos?: SectionVideoResponse[];
+  visual_aids?: SectionVisualAidResponse[];
 }
 
 export interface VisualizationResponse {
@@ -68,6 +69,13 @@ export interface SectionVideoResponse {
   viz_id: string;
   video_url: string;
   concept: string;
+}
+
+export interface SectionVisualAidResponse {
+  viz_id: string;
+  video_url: string;
+  concept: string;
+  paragraph_index: number | null;
 }
 
 export interface PaperResponse {
@@ -234,6 +242,12 @@ export async function getPaper(arxivId: string): Promise<Paper | null> {
         viz_id: v.viz_id,
         video_url: resolveVideoUrl(v.video_url) ?? v.video_url,
         concept: v.concept,
+      })),
+      visual_aids: (s.visual_aids ?? []).map((a) => ({
+        viz_id: a.viz_id,
+        video_url: resolveVideoUrl(a.video_url) ?? a.video_url,
+        concept: a.concept,
+        paragraph_index: a.paragraph_index ?? null,
       })),
     };
   });

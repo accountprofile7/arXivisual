@@ -557,6 +557,12 @@ function ReadyState({
         videoUrl: v.video_url,
         concept: v.concept,
       })),
+      visualAids: (s.visual_aids ?? []).map((a) => ({
+        vizId: a.viz_id,
+        videoUrl: a.video_url,
+        concept: a.concept,
+        paragraphIndex: a.paragraph_index,
+      })),
     })), [paper]);
 
   const heroContent = useMemo(() => (
@@ -877,7 +883,7 @@ function ProcessingState({
           {/* During the render phase these counts are real per-video progress */}
           {isRendering && status.sections_total > 0 && (
             <div className="mt-4 flex items-center gap-3 text-sm">
-              <span className="text-white/30">Videos rendered:</span>
+              <span className="text-white/30">Animations rendered:</span>
               <span className="font-mono text-white/60 bg-white/[0.06] px-2 py-0.5 rounded">
                 {status.sections_completed} / {status.sections_total}
               </span>
