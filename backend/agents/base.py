@@ -203,10 +203,11 @@ def _anthropic_model() -> str:
 
 
 def _anthropic_model_for(model: str | None) -> str:
-    """Requested model -> Claude model id. Empty and non-Claude (e.g. GPT)
-    names map to the configured Claude model; explicit claude-* names pass through."""
-    if model and model.startswith("claude"):
-        return model
+    """Requested model -> Claude model id. Always the configured model: the
+    names callers pass are legacy Dedalus/Azure defaults (the section formatter
+    still asks for claude-sonnet-4-5-20250929, which rejects `effort`), so they
+    must not override ANTHROPIC_MODEL."""
+    del model
     return _anthropic_model()
 
 

@@ -161,10 +161,13 @@ def test_model_arg_and_env_effort(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_EFFORT", "high")
     monkeypatch.setenv("ANTHROPIC_MODEL", "claude-env")
     asyncio.run(base.call_llm("hi"))
-    asyncio.run(base.call_llm("hi", model="claude-explicit"))
-    assert client.calls[0]["model"] == "claude-env"
+    # Caller-supplied names are legacy Dedalus/Azure-era defaults (e.g. the
+    # section formatter's claude-sonnet-4-5-20250929, which rejects `effort`);
+    # ANTHROPIC_MODEL alone decides the Claude model.
+    asyncio.run(base.call_llm("hi", model="claude-sonnet-4-5-20250929"))
+    asyncio.run(base.call_llm("hi", model="gpt-5-mini"))
+    assert [c["model"] for c in client.calls] == ["claude-env"] * 3
     assert client.calls[0]["output_config"] == {"effort": "high"}
-    assert client.calls[1]["model"] == "claude-explicit"
 
 
 def test_json_instruction_only_in_json_mode(monkeypatch):
