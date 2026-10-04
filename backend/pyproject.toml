@@ -41,6 +41,7 @@ dependencies = [
     "temporalio>=1.32.0",
     "posthog>=7.48.0",
     "azure-monitor-opentelemetry>=1.8.10",
+    "anthropic>=1.11.0",
 ]
 
 [project.optional-dependencies]
