@@ -61,6 +61,18 @@ Each generated scene must pass four gates in sequence. Any failure aborts the at
 
 If all 5 attempts fail, `VOICE_FAIL_BEHAVIOR` (default `return_silent`) keeps the last generated code as a pending, videoless visualization; `drop_viz` and `hard_error` are the alternatives.
 
+### Visual aids (silent loops, `ENABLE_VISUAL_AIDS=1`)
+
+A second, optional kind of visualization: short (5–10 s) **silent looping** clips shown inline right after the paragraph they illustrate, in addition to the narrated videos. Off by default; with the flag off nothing below runs and narrated behavior is unchanged.
+
+- **VisualAidAnalyzer** (`visual_aid_analyzer.py`) — one JSON-mode call per section. It sees the section's *display* paragraphs, numbered (`display_paragraphs` = `split_paragraphs(normalize_display_text(summary or content))`, the exact text the reader shows), and returns up to `VISUAL_AIDS_PER_SECTION` (3) aids, each with a `paragraph_index` anchor and 2–4 storyboard beats. Concepts already covered by narrated videos are skipped. LLM text fields are length-capped.
+- **No planner.** `build_aid_plan` turns the beats into a short `VisualAidPlan`, saving one LLM call per aid.
+- **`GenerationProfile`** (`pipeline.py`) — `NARRATED` reproduces the narrated settings exactly; `VISUAL_AID` is silent (plain `Scene`, or `ThreeDScene` for `three_d`), 5–10 s, 3 attempts, gate names prefixed `aid:` (ignored by `evals/metrics.py`), and a failed aid is **dropped**, never shown. The generator uses `prompts/manim_generator_silent.md` and the `examples/silent_loop.py` few-shot; narrated prompts are byte-identical to before (snapshot tests).
+- **Caps:** `VISUAL_AIDS_PER_SECTION` (3) and `MAX_VISUAL_AIDS` (15 per paper). Aids render through the same render path; `VISUAL_AID_RENDER_QUALITY` (default `low`) sets their quality.
+- **Storage:** `visualizations.kind` (`"visual_aid"`; `NULL`/`"narrated"` = narrated) and `anchor_paragraph`. On the legacy path aid ids are `viz_{id}_{101+j}`; on Temporal they take the next free index.
+- **Jobs:** aids never fail a job. Terminal status and finalize use narrated results only; progress counts every render. On Temporal, aid generation runs concurrently with the narrated renders behind `workflow.patched("visual-aids")`, and the repair round is narrated-only.
+- **Paragraph contract:** `ingestion/text_normalize.py:split_paragraphs` and `frontend/lib/paragraphs.ts` must agree (blank-line split, never inside `$$` or code fences, plain fallback if a block is left open). `frontend/scripts/check-paragraphs.mjs` checks the TypeScript twin against the same cases as `tests/test_split_paragraphs.py`.
+
 ### Pipeline Configuration
 
 Behavior knobs at the top of `agents/pipeline.py` (constants unless noted as env vars):
@@ -78,6 +90,10 @@ VOICE_FAIL_BEHAVIOR = "return_silent"
 RENDER_MODE                       # env: "local" | "modal"; "modal" also skips RenderTester
 VOICEOVER_TTS_SERVICE             # env: "openai" (default) | "gtts"
 VOICEOVER_VOICE_NAME              # env: default "nova"
+ENABLE_VISUAL_AIDS                # env: "1"/"true" enables silent visual aids (default off)
+VISUAL_AIDS_PER_SECTION           # env: default 3
+MAX_VISUAL_AIDS                   # env: default 15 per paper
+VISUAL_AID_RENDER_QUALITY         # env: "low" (default) | "medium" | "high"
 ```
 
 ## LLM Provider Layer (`agents/base.py`)
@@ -117,7 +133,7 @@ self.set_speech_service(OpenAIService(voice="nova", model="gpt-4o-mini-tts", tra
 |--------|----------|---------|
 | POST | `/api/process` | Start processing a paper; returns a job ID |
 | GET | `/api/status/{job_id}` | Poll job progress |
-| GET | `/api/paper/{arxiv_id}` | Processed paper: sections (each with `videos` = every `complete` visualization, newest first; `video_url` = `videos[0]` for older clients) + visualizations; superseded rows excluded; 404 for stale (pre-fix abstract-only) papers so the reader offers re-processing |
+| GET | `/api/paper/{arxiv_id}` | Processed paper: sections (each with `videos` = every `complete` visualization, newest first; `video_url` = `videos[0]` for older clients) + visualizations; `visual_aids` = complete silent aids in paragraph order, each with `paragraph_index`, never mixed into `videos`; superseded rows excluded; 404 for stale (pre-fix abstract-only) papers so the reader offers re-processing |
 | GET | `/api/papers` | Explore gallery: all processed papers |
 | GET | `/api/video/{video_id}` | Serve or redirect to a rendered video |
 | POST | `/api/render` | Dev-only raw Manim render — in production, 404 unless `RENDER_API_SECRET` is configured and presented via `X-Render-Secret` (timing-safe compare) |
@@ -128,7 +144,7 @@ CORS allows `arxivisual.org`, `www.arxivisual.org`, localhost dev, and whatever 
 
 ## Persistence (`backend/db/`)
 
-SQLAlchemy async ORM, four tables keyed off the arXiv ID: `papers`, `sections` (content, summary, equations/figures/tables as JSON), `visualizations` (concept, storyboard, Manim code, video URL, status), and `processing_jobs`. `DATABASE_URL` selects Postgres (asyncpg, used in production); unset falls back to local SQLite (aiosqlite).
+SQLAlchemy async ORM, four tables keyed off the arXiv ID: `papers`, `sections` (content, summary, equations/figures/tables as JSON), `visualizations` (concept, storyboard, Manim code, video URL, status, `kind`, `anchor_paragraph`), and `processing_jobs`. `DATABASE_URL` selects Postgres (asyncpg, used in production); unset falls back to local SQLite (aiosqlite). There is no alembic: `init_db` runs `create_all` and then `_add_missing_columns` (`db/connection.py`), which idempotently adds the nullable columns listed in `_ADDED_COLUMNS` (`IF NOT EXISTS` on Postgres, so concurrent replica startups are safe).
 
 ## Observability (Langfuse)
 

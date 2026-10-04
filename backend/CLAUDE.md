@@ -43,6 +43,7 @@ POST /api/process  (api/routes.py: rate-limit + dedupe [api/throttle.py] + stale
 | 5 | SpatialValidator | `agents/spatial_validator.py` | gate: bounds/overlap regex, no LLM |
 | 6 | VoiceoverScriptValidator | `agents/voiceover_script_validator.py` | gate: narration quality, heuristics + LLM judge |
 | 7 | RenderTester | `agents/render_tester.py` | gate: dry-run construct() execution in a stubbed subprocess (auto-skipped when `RENDER_MODE=modal`) |
+| + | VisualAidAnalyzer | `agents/visual_aid_analyzer.py` | LLM, only with `ENABLE_VISUAL_AIDS=1`: ≤3 silent looping aids per section, each anchored to a display paragraph; then generator + gates 4,5,7 under the `VISUAL_AID` profile (no planner, no voice gate) |
 
 SectionAnalyzer and VisualizationPlanner run in JSON mode on Azure (`response_format=json_object`; the
 Dedalus fallback can only be prompted) with a short analyst persona (`prompts/system/json_analyst.md`, not
@@ -126,6 +127,9 @@ npm/pip audit (advisory). `evals.yml` — nightly 06:00 UTC golden-set evals, fa
 ## Feature flags
 
 - `USE_TEMPORAL=1` — durable orchestration; any Temporal error falls back (fail-open) to the legacy in-process path.
+- `ENABLE_VISUAL_AIDS=1` — silent looping visual aids (`kind="visual_aid"`, `anchor_paragraph`) alongside narrated videos; caps
+  `VISUAL_AIDS_PER_SECTION` (3) / `MAX_VISUAL_AIDS` (15), `VISUAL_AID_RENDER_QUALITY` (`low`). Default off = narrated
+  behavior unchanged. Aids never fail a job, are excluded from repair, `videos`, and the gallery count. See ARCHITECTURE.md.
 - `ENABLE_VISUAL_QA=1` — vision judge on rendered frames (observe-only on legacy path; verdict feeds repair on Temporal path).
 - `VISUAL_QA_REPAIR=1` — one **vision-grounded** repair round for `major` defects (Temporal path only): the
   rendered video is read back through the storage backend (never the CDN URL — stable keys cache for a year),
@@ -178,5 +182,7 @@ npm/pip audit (advisory). `evals.yml` — nightly 06:00 UTC golden-set evals, fa
    sections replaced, old viz rows unlinked from sections, then superseded by `finalize_job` once the new run has
    videos). Legacy truncated-id viz rows (`viz_17060376_1`) are superseded at API startup where a full-id complete
    row exists.
-10. **Keep `pytest` hermetic.** `testpaths=["tests"]` exists because scripts under `tools/` fire real API calls
+10. **Paragraph anchors have two owners that must agree:** `ingestion/text_normalize.py:split_paragraphs` and
+   `frontend/lib/paragraphs.ts`. Change both together and run `node frontend/scripts/check-paragraphs.mjs`.
+11. **Keep `pytest` hermetic.** `testpaths=["tests"]` exists because scripts under `tools/` fire real API calls
    on collection; new tests must not need network or real keys.
