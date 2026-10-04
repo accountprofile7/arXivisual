@@ -510,3 +510,10 @@ def test_golden_set_shape_and_limit():
     assert [e["arxiv_id"] for e in load_golden_set(3)] == [
         e["arxiv_id"] for e in entries[:3]
     ]
+
+
+def test_hook_ignores_visual_aid_gates():
+    gm = GateMetrics()
+    gm.hook("aid:code_validator", 0, True)
+    gm.hook("aid:render_tester", 0, False)
+    assert gm.traces == []

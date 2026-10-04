@@ -71,6 +71,7 @@ def _prompt_generator():
     g = ManimGenerator.__new__(ManimGenerator)
     g.prompt_template = (_PROMPTS / "manim_generator.md").read_text()
     g.silent_prompt_template = (_PROMPTS / "manim_generator_silent.md").read_text()
+    g.silent_example = "# silent example"
     g.examples = {VisualizationType.DATA_FLOW: "# plain example"}
     g.voiceover_examples = {VisualizationType.DATA_FLOW: "# voice example"}
     return g
@@ -102,7 +103,8 @@ def test_silent_prompt_has_no_voice_wording_and_has_loop_rules():
     assert "LAST frame must match the FIRST frame" in prompt
     assert "title card" in lowered
     assert "[-6, 6]" in prompt
-    assert "# plain example" in prompt
+    assert "# silent example" in prompt
+    assert "# plain example" not in prompt
 
 
 def test_silent_feedback_prompt_has_no_narration_wording():
@@ -149,3 +151,20 @@ def test_narrated_feedback_prompt_still_mentions_narration():
     g._call_llm = fake_call
     asyncio.run(g.run_with_feedback(plan=_plan(), previous_code="x", error_message="bad"))
     assert "Keep strict narration quality" in captured["prompt"]
+
+
+def test_silent_prompt_uses_dedicated_silent_example():
+    from agents.code_validator import CodeValidator
+
+    example = (Path(__file__).parent.parent / "examples" / "silent_loop.py").read_text()
+    g = _prompt_generator()
+    g.silent_example = example
+    prompt = g._build_prompt(_plan(), False, "openai", "nova", "friendly_tutor", (5, 10), silent_loop=True)
+    assert example in prompt
+    assert "# plain example" not in prompt
+
+    assert "ThreeDScene" not in example and "(Scene)" in example
+    assert "Title" not in example and "title" not in example.lower()
+    assert "voice" not in example.lower() and "narrat" not in example.lower()
+    result = CodeValidator().validate(example)
+    assert result.is_valid and not result.needs_regeneration

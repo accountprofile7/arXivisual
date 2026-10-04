@@ -63,6 +63,9 @@ class ManimGenerator(BaseAgent):
         VisualizationType.THREE_D: "voiceover_architecture.py",
     }
 
+    # Few-shot example for silent looping aids (short, no title card, loops).
+    SILENT_EXAMPLE = "silent_loop.py"
+
     DEFAULT_EXAMPLE = "equation_walkthrough.py"
     DEFAULT_VOICEOVER_EXAMPLE = "voiceover_equation.py"
 
@@ -87,6 +90,8 @@ class ManimGenerator(BaseAgent):
         # Dedicated template for short silent looping visual aids; the narrated
         # template above is never touched by silent mode.
         self.silent_prompt_template = self._load_prompt("manim_generator_silent.md")
+        silent_example = self._get_examples_dir() / self.SILENT_EXAMPLE
+        self.silent_example = silent_example.read_text() if silent_example.exists() else ""
         self.examples = self._load_examples(self.EXAMPLE_FILES, self.DEFAULT_EXAMPLE)
         self.voiceover_examples = self._load_examples(
             self.VOICEOVER_EXAMPLE_FILES,
@@ -240,7 +245,7 @@ class ManimGenerator(BaseAgent):
         try:
             return self._format_prompt(
                 plan_json=plan.model_dump_json(indent=2, exclude={"narration_points"}),
-                example_code=self._get_example_for_type(plan.visualization_type, False),
+                example_code=self.silent_example,
                 duration_seconds=plan.duration_seconds,
                 target_min_duration=target_duration_seconds[0],
                 target_max_duration=target_duration_seconds[1],
