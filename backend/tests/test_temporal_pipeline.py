@@ -143,7 +143,8 @@ class TestWorkflowOrchestration:
         assert sorted(calls["render"]) == ["aid_1", "aid_2", "viz_1", "viz_2"]
         # Progress counts every render; the terminal tally is narrated only.
         assert [c for c, _ in calls["progress"]] == [1, 2, 3, 4]
-        assert {t for _, t in calls["progress"]} == {4}
+        totals = [t for _, t in calls["progress"]]
+        assert totals == sorted(totals) and totals[-1] == 4  # total grows as aids arrive
         assert calls["finalize"] == [(2, 2)]
         assert result == "rendered 2/2 (0 flagged, 0 repaired) + 1/2 visual aids"
 
