@@ -40,7 +40,7 @@ _DRIVER_PATH = Path(__file__).with_name("dry_run_driver.py")
 _TMPDIR_PREFIX = "dry-run-gate-"
 # The dry run needs no real credentials (TTS is stubbed, nothing uploads) and
 # it executes LLM-generated code — scrub secrets from the child environment.
-_SECRET_ENV_PREFIXES = ("AZURE_", "S3_", "LANGFUSE_", "DEDALUS_")
+_SECRET_ENV_PREFIXES = ("AZURE_", "S3_", "LANGFUSE_", "DEDALUS_", "ANTHROPIC_")
 _SECRET_ENV_KEYS = ("DATABASE_URL", "RENDER_API_SECRET", "OPENAI_API_KEY")
 
 

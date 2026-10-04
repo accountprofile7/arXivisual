@@ -57,7 +57,9 @@ def _tts_subprocess_env() -> dict[str, str]:
     OpenAI-compatible endpoint so voiceover audio bills against Azure credits.
     A pre-existing ``OPENAI_API_KEY`` (e.g. a real OpenAI key) is respected.
     """
-    env = dict(os.environ)
+    # The subprocess executes LLM-generated code and never calls Claude, so
+    # the Claude credentials stay out of its environment.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("ANTHROPIC_")}
     if not env.get("OPENAI_API_KEY"):
         endpoint = env.get("AZURE_OPENAI_ENDPOINT", "").rstrip("/")
         key = env.get("AZURE_OPENAI_API_KEY", "")

@@ -55,6 +55,17 @@ class TestDryRunExecution:
         result = asyncio.run(tester.test_render(VALID_SCENE))
         assert result.success, f"{result.error_type}: {result.error_message}"
 
+    def test_generated_code_cannot_see_claude_credentials(self, tester, monkeypatch):
+        # construct() is LLM-generated, untrusted code; it must not see the key.
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "claude-secret")
+        scene = VALID_SCENE.replace(
+            "box = RoundedRectangle",
+            "import os; assert 'ANTHROPIC_API_KEY' not in os.environ\n        box = RoundedRectangle",
+        )
+        result = asyncio.run(tester.test_render(scene))
+        assert result.success, f"{result.error_type}: {result.error_message}"
+
+
     def test_numpy_truth_value_bug_is_caught(self, tester):
         result = asyncio.run(tester.test_render(NUMPY_BUG_SCENE))
         assert not result.success

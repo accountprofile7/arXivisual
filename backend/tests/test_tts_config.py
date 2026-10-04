@@ -88,3 +88,15 @@ def test_render_env_respects_existing_openai_key(monkeypatch):
     assert "OPENAI_BASE_URL" not in env or env["OPENAI_BASE_URL"] != (
         "https://example.openai.azure.com/openai/v1/"
     )
+
+
+def test_render_env_drops_anthropic_credentials(monkeypatch):
+    # The render subprocess executes LLM-generated code and never calls Claude.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "claude-secret")
+    monkeypatch.setenv("ANTHROPIC_MODEL", "claude-sonnet-5-5")
+
+    from rendering import local_runner
+    importlib.reload(local_runner)
+    env = local_runner._tts_subprocess_env()
+
+    assert not any(k.startswith("ANTHROPIC_") for k in env)
