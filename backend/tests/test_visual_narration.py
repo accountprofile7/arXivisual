@@ -186,7 +186,7 @@ def test_generator_prompt_has_layout_and_contrast_rules_when_on(monkeypatch):
     assert "Never use `GREY`" in prompt
     assert "opacity below 0.8" in prompt
     assert "`font_size` of at least 28" in prompt
-    assert "buff of 0.15 or more" in prompt
+    assert "buff of 0.3 or more" in prompt
     # Final composition.
     assert "Final composition" in prompt
     assert "simplified block icons at legible size" in prompt
@@ -202,10 +202,10 @@ def test_generator_prompt_has_layout_pacing_and_budget_when_on(monkeypatch):
     prompt = _narrated(_generator())
     # Layout convention with concrete coordinates.
     assert "14.2 wide x 8 tall" in prompt
-    assert "7.5 x 5.0" in prompt
-    assert "3.2 x 2.0" in prompt
+    assert "7.0 x 3.8" in prompt
+    assert "3.0 x 1.5" in prompt
     assert "`UL`, `UR`, `DL`, `DR`" in prompt
-    assert "`buff` of at least 0.2" in prompt
+    assert "flush with the four corners of the base safe area" in prompt
     assert "named constants and helpers" in prompt
     assert "never cleared" in prompt.lower() or "It is never cleared" in prompt
     assert "Indicate" in prompt and "Circumscribe" in prompt
@@ -237,3 +237,50 @@ def test_few_shot_snippet_passes_code_validator():
     result = CodeValidator().validate(code)
     assert result.is_valid and not result.needs_regeneration, result.issues_found
     assert check_text_budget(result.code).passed
+
+
+def _snippet():
+    import re
+
+    block = (_PROMPTS / "visual_narration_generator.md").read_text(encoding="utf-8")
+    return re.search(r"```python\n(.*?)```", block, re.S).group(1)
+
+
+def test_snippet_layout_constants_inside_safe_area_and_non_overlapping():
+    import re
+
+    ns: dict = {}
+    for line in _snippet().splitlines():
+        if re.fullmatch(r"[A-Z_]+(, [A-Z_]+)* = [\d.]+(, [\d.]+)*", line):
+            exec(line, ns)  # numeric constant lines from our own prompt
+    safe_x, safe_y = ns["SAFE_X"], ns["SAFE_Y"]
+    assert (safe_x, safe_y) == (6.0, 3.5)  # base prompt / SpatialValidator safe area
+    cw, ch, w, h = ns["CORNER_W"], ns["CORNER_H"], ns["CENTER_W"], ns["CENTER_H"]
+    corner = (safe_x - cw, safe_x, safe_y - ch, safe_y)  # top-right box: x0, x1, y0, y1
+    center = (-w / 2, w / 2, -h / 2, h / 2)
+    assert center[1] <= safe_x and center[3] <= safe_y
+    x_overlap = corner[0] < center[1] and center[0] < corner[1]
+    y_overlap = corner[2] < center[3] and center[2] < corner[3]
+    assert not (x_overlap and y_overlap)
+    # Opposite corners on the same side never meet either.
+    assert 2 * cw < 2 * safe_x and 2 * ch < 2 * safe_y
+
+
+def test_snippet_dot_respects_minimum_size():
+    import re
+
+    radii = [float(r) for r in re.findall(r"Dot\(radius=([\d.]+)", _snippet())]
+    assert radii and all(2 * r >= 0.25 for r in radii)
+
+
+def test_generator_block_states_overrides_and_render_defect_rules(monkeypatch):
+    monkeypatch.setenv("VISUAL_NARRATION", "1")
+    prompt = _narrated(_generator())
+    assert "overrides the base spatial rules" in prompt
+    assert "never FadeOut or clear the center stage" in prompt
+    assert "`buff` is at least 0.3 everywhere" in prompt
+    assert "counts TAGS only" in prompt
+    assert "`Transform` / `ReplacementTransform` its label too" in prompt
+    assert "never drawn twice on top of itself" in prompt
+    assert "recap lives ONLY in the BR corner" in prompt
+    assert "nothing new is added over the center stage except highlights" in prompt
