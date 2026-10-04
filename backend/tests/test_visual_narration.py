@@ -162,3 +162,28 @@ def test_retry_prompt_unchanged_when_off():
     prompt = _retry_prompt(_generator())
     assert "Show, Don't Label" not in prompt
     assert "VISUAL AID" not in prompt
+
+
+def test_generator_prompt_has_layout_and_contrast_rules_when_on(monkeypatch):
+    monkeypatch.setenv("VISUAL_NARRATION", "1")
+    prompt = _narrated(_generator())
+    # Opening: title alone, cleared before the diagram, diagram below it.
+    assert "title appears ALONE" in prompt
+    assert ".animate.to_edge(UP).scale(" in prompt
+    assert "BEFORE any diagram element appears" in prompt
+    assert "below y = 2.5" in prompt
+    # Tag contrast.
+    assert "high-contrast color" in prompt
+    assert "Never use `GREY`" in prompt
+    assert "opacity below 0.8" in prompt
+    assert "`font_size` of at least 28" in prompt
+    assert "buff of 0.15 or more" in prompt
+    # Final composition.
+    assert "between 40% and 85% of the frame width" in prompt
+    assert "centered vertically in the safe area" in prompt
+    assert "simplified block icons at legible size" in prompt
+    assert "`FadeOut` all previous content" in prompt
+
+
+def test_layout_and_contrast_rules_absent_when_off():
+    assert "title appears ALONE" not in _narrated(_generator())

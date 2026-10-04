@@ -10,3 +10,10 @@ Show-don't-label rules:
 - Time the drawing to the line: the shape's `self.play(..., run_time=tracker.duration)` happens inside the voiceover block that names the quantity, so the shape appears as the quantity is spoken.
 - Prefer simple primitives that render reliably at 480p: `Rectangle`, `Square`, `RoundedRectangle`, `Arrow`, `CurvedArrow`, `Circle`, `VGroup`. Avoid `Prism`, `Cube`, 3D scenes, and anything needing LaTeX packages beyond basics.
 - Keep every spatial, safe-area and LaTeX rule above. The non-"VISUAL AID:" scenes stay as they are.
+
+Layout and contrast rules for "VISUAL AID:" scenes (REQUIRED):
+- Opening: the title appears ALONE. Then either `FadeOut` the title or move it with `.animate.to_edge(UP).scale(0.6)` BEFORE any diagram element appears. No diagram mobject may overlap the title's region; when a title stays pinned at the top, keep the whole diagram below y = 2.5.
+- Tag contrast: every `Text` / `MathTex` tag uses a high-contrast color (`WHITE` or a bright palette color such as `YELLOW`, `TEAL`, `ORANGE`). Never use `GREY`, any `DARK_*` color, or opacity below 0.8 for text. Use `font_size` of at least 28 for `Text` at 480p, and place each tag with `next_to(shape, DOWN, buff=0.2)` (buff of 0.15 or more) so it never touches a shape.
+- Final composition: every scene's last frame must fill a reasonable part of the safe area: the main group's width between 40% and 85% of the frame width, centered vertically in the safe area. Never shrink the whole detailed diagram into a tiny cluster at the top.
+- Repeated or stacked blocks ("this block repeats N times"): draw a few simplified block icons at legible size (for example 3 `RoundedRectangle` icons plus a "..." tag) instead of scaling the full detailed diagram down.
+- `FadeOut` all previous content before building a new composition, so old and new shapes never overlap.
