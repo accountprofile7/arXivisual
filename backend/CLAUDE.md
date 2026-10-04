@@ -131,6 +131,7 @@ npm/pip audit (advisory). `evals.yml` — nightly 06:00 UTC golden-set evals, fa
 - `ENABLE_VISUAL_AIDS=1` — silent looping visual aids (`kind="visual_aid"`, `anchor_paragraph`) alongside narrated videos; caps
   `VISUAL_AIDS_PER_SECTION` (3) / `MAX_VISUAL_AIDS` (15), `VISUAL_AID_RENDER_QUALITY` (`low`). Default off = narrated
   behavior unchanged. Aids never fail a job, are excluded from repair, `videos`, and the gallery count. See ARCHITECTURE.md.
+- `VISUAL_NARRATION=1` — narrated videos get exactly 3 "visual aid moments" where the narration names a quantity/structure from the paper and the screen draws it (proportional slabs, kernel grids, shortcut arrows) instead of writing it. Read at call time by the planner and the narrated generator (`agents/visual_narration.py`; blocks in `prompts/visual_narration_*.md`, also kept on retries). Default off = prompts byte-identical (snapshot tests). Silent aids unaffected. Dev tool: `tools/run_single_concept.py` (spends money).
 - `ENABLE_VISUAL_QA=1` — vision judge on rendered frames (observe-only on legacy path; verdict feeds repair on Temporal path).
 - `VISUAL_QA_REPAIR=1` — one **vision-grounded** repair round for `major` defects (Temporal path only): the
   rendered video is read back through the storage backend (never the CDN URL — stable keys cache for a year),

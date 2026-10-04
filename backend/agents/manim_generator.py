@@ -22,10 +22,22 @@ try:
     )
     from .base import BaseAgent
     from .context7_docs import get_manim_docs
+    from .visual_narration import (
+        GENERATOR_ANCHOR,
+        insert_block,
+        load_block,
+        visual_narration_enabled,
+    )
 except ImportError:
     sys.path.insert(0, str(Path(__file__).parent.parent))
     from agents.base import BaseAgent
     from agents.context7_docs import get_manim_docs
+    from agents.visual_narration import (
+        GENERATOR_ANCHOR,
+        insert_block,
+        load_block,
+        visual_narration_enabled,
+    )
     from models.generation import (
         GeneratedCode,
         VisualizationPlan,
@@ -217,20 +229,30 @@ class ManimGenerator(BaseAgent):
         tts_setup_snippet = self._get_tts_setup_snippet(tts_service, voice_name)
         tts_import = self._get_tts_import(tts_service)
 
-        return self._format_prompt(
-            plan_json=plan.model_dump_json(indent=2),
-            example_code=example_code,
-            duration_seconds=plan.duration_seconds,
-            target_min_duration=target_duration_seconds[0],
-            target_max_duration=target_duration_seconds[1],
-            scene_class_name=scene_class_name,
-            voiceover_enabled=str(voiceover_enabled).lower(),
-            tts_service=tts_service,
-            voice_name=voice_name,
-            narration_style=narration_style,
-            tts_setup_snippet=tts_setup_snippet,
-            tts_import=tts_import,
-        )
+        # VISUAL_NARRATION=1: narrated prompts gain the "Show, don't label" block.
+        # Same swap-and-restore as the silent prompt (no await in between).
+        narrated_template = self.prompt_template
+        if voiceover_enabled and visual_narration_enabled():
+            self.prompt_template = insert_block(
+                narrated_template, GENERATOR_ANCHOR, load_block("visual_narration_generator.md")
+            )
+        try:
+            return self._format_prompt(
+                plan_json=plan.model_dump_json(indent=2),
+                example_code=example_code,
+                duration_seconds=plan.duration_seconds,
+                target_min_duration=target_duration_seconds[0],
+                target_max_duration=target_duration_seconds[1],
+                scene_class_name=scene_class_name,
+                voiceover_enabled=str(voiceover_enabled).lower(),
+                tts_service=tts_service,
+                voice_name=voice_name,
+                narration_style=narration_style,
+                tts_setup_snippet=tts_setup_snippet,
+                tts_import=tts_import,
+            )
+        finally:
+            self.prompt_template = narrated_template
 
     def _build_silent_prompt(
         self,
@@ -402,6 +424,11 @@ class ManimGenerator(BaseAgent):
             expectations = """- Preserve concept accuracy and scene progression from the plan
 - Keep strict narration quality (educational, concept-focused)
 - If voiceover is enabled, keep tracker-timed play calls with run_time=tracker.duration"""
+            if voiceover_enabled and visual_narration_enabled():
+                expectations += (
+                    '\n- Keep every "VISUAL AID:" scene DRAWN as proportional geometry inside the '
+                    "voiceover block that names it; text only as a short tag after the shape exists"
+                )
 
         error_feedback = f"""
 ## Previous Attempt Failed!

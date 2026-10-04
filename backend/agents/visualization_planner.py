@@ -12,9 +12,21 @@ try:
         VisualizationType,
     )
     from .base import BaseAgent
+    from .visual_narration import (
+        PLANNER_ANCHOR,
+        insert_block,
+        load_block,
+        visual_narration_enabled,
+    )
 except ImportError:
     sys.path.insert(0, str(Path(__file__).parent.parent))
     from agents.base import BaseAgent
+    from agents.visual_narration import (
+        PLANNER_ANCHOR,
+        insert_block,
+        load_block,
+        visual_narration_enabled,
+    )
     from models.generation import (
         Scene,
         VisualizationCandidate,
@@ -38,6 +50,30 @@ class VisualizationPlanner(BaseAgent):
     def __init__(self, model: str | None = None):
         super().__init__("visualization_planner.md", model=model, system_prompt_file="system/json_analyst.md")
     
+    def _build_prompt(
+        self,
+        candidate: VisualizationCandidate,
+        full_section_content: str,
+        paper_context: str,
+    ) -> str:
+        """Format the planner prompt; VISUAL_NARRATION=1 adds the visual-aid block."""
+        template = self.prompt_template
+        if visual_narration_enabled():
+            self.prompt_template = insert_block(
+                template, PLANNER_ANCHOR, load_block("visual_narration_planner.md")
+            )
+        try:
+            return self._format_prompt(
+                concept_name=candidate.concept_name,
+                concept_description=candidate.concept_description,
+                visualization_type=candidate.visualization_type.value,
+                context=candidate.context,
+                section_content=full_section_content,
+                paper_context=paper_context,
+            )
+        finally:
+            self.prompt_template = template
+
     async def run(
         self,
         candidate: VisualizationCandidate,
@@ -55,14 +91,7 @@ class VisualizationPlanner(BaseAgent):
         Returns:
             VisualizationPlan with scenes and storyboard
         """
-        prompt = self._format_prompt(
-            concept_name=candidate.concept_name,
-            concept_description=candidate.concept_description,
-            visualization_type=candidate.visualization_type.value,
-            context=candidate.context,
-            section_content=full_section_content,
-            paper_context=paper_context,
-        )
+        prompt = self._build_prompt(candidate, full_section_content, paper_context)
         
         result = await self._call_llm_json(prompt)
         return self._parse_result(result, candidate.visualization_type)
@@ -108,14 +137,7 @@ class VisualizationPlanner(BaseAgent):
         paper_context: str,
     ) -> VisualizationPlan:
         """Synchronous version for testing."""
-        prompt = self._format_prompt(
-            concept_name=candidate.concept_name,
-            concept_description=candidate.concept_description,
-            visualization_type=candidate.visualization_type.value,
-            context=candidate.context,
-            section_content=full_section_content,
-            paper_context=paper_context,
-        )
+        prompt = self._build_prompt(candidate, full_section_content, paper_context)
         
         text = self._call_llm_sync(prompt)
 
