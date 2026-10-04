@@ -173,3 +173,47 @@ def test_validator_flags_blank_narration_as_zero_words():
     result = validator.validate(generated_code=generated, plan=_plan(), candidate=_candidate())
     assert result.is_valid is False
     assert any("0 words" in issue for issue in result.issues_found)
+
+
+def _phrase_paced(lines):
+    body = "\n".join(
+        f'        with self.voiceover(text="{ln}") as tracker:\n            self.play(Create(Arrow(LEFT, RIGHT)), run_time=tracker.duration)'
+        for ln in lines
+    )
+    code = (
+        "from manim import *\nfrom manim_voiceover import VoiceoverScene\n"
+        "class A(VoiceoverScene):\n    def construct(self):\n"
+        "        self.set_speech_service(GTTSService(transcription_model=None))\n" + body + "\n"
+    )
+    return GeneratedCode(
+        code=code,
+        scene_class_name="A",
+        dependencies=["manim"],
+        voiceover_enabled=True,
+        narration_lines=list(lines),
+        narration_beats=[],
+    )
+
+
+_PHRASES = [
+    "Queries meet keys here.",  # 4 words
+    "Softmax weights each value strongly.",  # 5 words
+    "Scores become attention weights across tokens.",  # 6 words
+]
+
+
+def test_phrase_paced_lines_fail_min_words_when_flag_off(monkeypatch):
+    monkeypatch.delenv("VISUAL_NARRATION", raising=False)
+    out = VoiceoverScriptValidator(use_llm_judge=False).validate(_phrase_paced(_PHRASES), _plan(), _candidate())
+    assert any("outside the 6-40 words range" in i for i in out.issues_found)
+
+
+def test_phrase_paced_lines_pass_min_words_when_flag_on(monkeypatch):
+    monkeypatch.setenv("VISUAL_NARRATION", "1")
+    out = VoiceoverScriptValidator(use_llm_judge=False).validate(_phrase_paced(_PHRASES), _plan(), _candidate())
+    assert not any("words range" in i for i in out.issues_found)
+    # Still enforced: 3-word line fails, and max stays 40.
+    out = VoiceoverScriptValidator(use_llm_judge=False).validate(
+        _phrase_paced(["Too short now."]), _plan(), _candidate()
+    )
+    assert any("outside the 4-40 words range" in i for i in out.issues_found)

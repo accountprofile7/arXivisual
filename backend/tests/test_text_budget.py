@@ -83,3 +83,39 @@ def test_syntax_error_is_not_this_gates_problem():
     r = check_text_budget("def (:")
     assert r.passed
     assert r.notes
+
+
+def test_never_raises_on_hostile_input():
+    assert check_text_budget("x = 1\0").passed
+    assert check_text_budget("x = " + "(" * 5000 + "1" + ")" * 5000).passed
+    deep = "x = " + "-" * 100000 + "1"
+    assert check_text_budget(deep).passed
+
+
+def test_internal_failure_fails_open(monkeypatch):
+    from agents import text_budget
+
+    def boom(_code):
+        raise RuntimeError("x")
+
+    monkeypatch.setattr(text_budget, "_check", boom)
+    r = check_text_budget("pass")
+    assert r.passed and r.notes
+
+
+def test_markup_tags_are_stripped_before_counting():
+    r = check_text_budget(_scene('MarkupText("<b>big</b> <span foreground=\\"red\\">idea</span>")'))
+    assert r.passed
+    assert r.tag_words == 2
+
+
+def test_sentence_hidden_in_math_text_is_counted():
+    r = check_text_budget(_scene('MathTex(r"x = \\text{this is a hidden sentence}")\nTex(r"\\text{two words}")'))
+    assert not r.passed
+    assert any("hides 5 words" in v for v in r.violations)
+    assert r.tag_words == 5 + 2
+
+
+def test_plain_math_still_counts_one():
+    r = check_text_budget(_scene('MathTex(r"\\frac{a}{b}")\nMathTex("x", "+", "y")'))
+    assert r.passed and r.tag_words == 2

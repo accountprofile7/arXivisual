@@ -10,12 +10,14 @@ try:
     from ..models.generation import GeneratedCode, VisualizationCandidate, VisualizationPlan
     from ..models.voiceover import VoiceoverValidationOutput
     from .base import call_llm_sync, get_model_name
+    from .visual_narration import visual_narration_enabled
 except ImportError:
     import sys
     from pathlib import Path
 
     sys.path.insert(0, str(Path(__file__).parent.parent))
     from agents.base import call_llm_sync, get_model_name
+    from agents.visual_narration import visual_narration_enabled
     from models.generation import GeneratedCode, VisualizationCandidate, VisualizationPlan
     from models.voiceover import VoiceoverValidationOutput
 
@@ -48,6 +50,14 @@ class VoiceoverScriptValidator:
         self.use_llm_judge = use_llm_judge
         self.model = get_model_name(model)
 
+    # VISUAL_NARRATION narrates in 4-8 word phrases, so only the minimum relaxes.
+    PHRASE_MIN_WORDS = 4
+
+    def _effective_min_words(self) -> int:
+        if visual_narration_enabled():
+            return min(self.min_words, self.PHRASE_MIN_WORDS)
+        return self.min_words
+
     def validate(
         self,
         generated_code: GeneratedCode,
@@ -56,6 +66,7 @@ class VoiceoverScriptValidator:
     ) -> VoiceoverValidationOutput:
         """Run strict validation for narration + voiceover code shape."""
         issues: list[str] = []
+        min_words = self._effective_min_words()
         code = generated_code.code
         narrations = generated_code.narration_lines
 
@@ -93,10 +104,10 @@ class VoiceoverScriptValidator:
             # whitespace-only narration counts as zero words and fails the rule
             # instead of silently passing validation.
             word_count = self._word_count(stripped)
-            if word_count < self.min_words or word_count > self.max_words:
+            if word_count < min_words or word_count > self.max_words:
                 issues.append(
                     f"Narration {idx} is {word_count} words, outside the "
-                    f"{self.min_words}-{self.max_words} words range."
+                    f"{min_words}-{self.max_words} words range."
                 )
 
             if not stripped:
@@ -106,7 +117,7 @@ class VoiceoverScriptValidator:
                 issues.append(f"Narration {idx} starts with animation command style wording.")
 
             alignment_rule_scores.append(self._rule_alignment_score(stripped, reference_terms))
-            educational_rule_scores.append(self._rule_educational_score(stripped))
+            educational_rule_scores.append(self._rule_educational_score(stripped, min_words))
 
         rule_alignment = (
             sum(alignment_rule_scores) / len(alignment_rule_scores)
@@ -182,7 +193,7 @@ class VoiceoverScriptValidator:
         score = 0.45 + (0.20 * min(3, anchor_hits)) + (0.25 * overlap_ratio)
         return max(0.0, min(1.0, score))
 
-    def _rule_educational_score(self, line: str) -> float:
+    def _rule_educational_score(self, line: str, min_words: int | None = None) -> float:
         low = line.lower()
         penalties = 0.0
         if any(low.startswith(bad) for bad in self.BANNED_STARTS):
@@ -191,7 +202,7 @@ class VoiceoverScriptValidator:
             penalties += 0.20
         if "watch" in low or "now we" in low:
             penalties += 0.15
-        if self._word_count(line) < self.min_words:
+        if self._word_count(line) < (self.min_words if min_words is None else min_words):
             penalties += 0.20
         base = 0.95
         return max(0.0, min(1.0, base - penalties))

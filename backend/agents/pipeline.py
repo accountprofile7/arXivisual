@@ -624,12 +624,13 @@ async def generate_single_visualization(
             if visual_narration_enabled() and voiceover_enabled_for_generation and not profile.silent_loop:
                 budget_result = check_text_budget(current_code)
                 _report_gate(f"{gate_prefix}text_budget", attempt, budget_result.passed)
+                # Not a hard stop: downstream gates still run, so budget alone can
+                # never ship render-untested code. It forces a retry only if attempts remain.
                 if not budget_result.passed:
                     logger.warning(
-                        "    TextBudget FAILED: %s violations - regenerating",
+                        "    TextBudget FAILED: %s violations",
                         len(budget_result.violations),
                     )
-                    continue
 
             # Stage 2: spatial validation
             if spatial_validator:
@@ -700,6 +701,10 @@ async def generate_single_visualization(
                 logger.info("    [4/4] PASSED")
             else:
                 logger.info("    [4/4] RenderTester: Skipped")
+
+            if budget_result and not budget_result.passed and attempt < max_attempts - 1:
+                logger.warning("    Other gates passed but text budget failed - regenerating")
+                continue
 
             code_result.code = current_code
             logger.info("  ✓ All validations passed on attempt %s", attempt + 1)

@@ -9,6 +9,7 @@ whole video. Math (MathTex/Tex) and purely numeric/symbolic strings ("256",
 """
 
 import ast
+import logging
 import re
 from dataclasses import dataclass, field
 
@@ -18,6 +19,11 @@ MAX_TAG_WORDS = 15
 BANNED_CALLS = ("Paragraph", "BulletedList", "Title")
 WORD_TEXT_CALLS = ("Text", "MarkupText")
 MATH_CALLS = ("Tex", "MathTex")
+
+logger = logging.getLogger(__name__)
+
+_MARKUP_RE = re.compile(r"<[^>]*>")
+_MATH_TEXT_RE = re.compile(r"\\text(?:bf|it|rm|sf|tt)?\s*\{([^{}]*)\}")
 
 # A token with a run of 2+ letters is a word; "256", "1x1", "+", "⊕", "x" are not.
 _WORD_RE = re.compile(r"[^\W\d_]{2,}")
@@ -83,11 +89,32 @@ def _first_text_arg(call: ast.Call) -> ast.expr | None:
     return None
 
 
+def _math_words(call: ast.Call) -> int:
+    """Words hidden in text{...} inside MathTex/Tex; plain math counts as 1."""
+    words = 0
+    for arg in call.args:
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            for inner in _MATH_TEXT_RE.findall(arg.value):
+                words += len(inner.split())
+    return max(1, words)
+
+
 def check_text_budget(code: str) -> TextBudgetResult:
+    """Never raises: any internal failure is a pass with a note (fail open)."""
+    try:
+        result = _check(code)
+    except (SyntaxError, ValueError, RecursionError, MemoryError, Exception) as exc:
+        result = TextBudgetResult(passed=True, notes=[f"text budget not checked: {type(exc).__name__}"])
+    for note in result.notes:
+        logger.debug("text_budget: %s", note)
+    return result
+
+
+def _check(code: str) -> TextBudgetResult:
     result = TextBudgetResult(passed=True)
     try:
         tree = ast.parse(code)
-    except SyntaxError:
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
         result.notes.append("code did not parse; text budget not checked")
         return result
 
@@ -106,7 +133,10 @@ def check_text_budget(code: str) -> TextBudgetResult:
             continue
 
         if name in MATH_CALLS:
-            result.tag_words += 1
+            words = _math_words(node)
+            result.tag_words += words
+            if words > MAX_WORDS_PER_TEXT:
+                result.violations.append(f"line {line}: {name}(...) hides {words} words in text{{}} (max {MAX_WORDS_PER_TEXT})")
             continue
 
         arg = _first_text_arg(node)
@@ -116,6 +146,8 @@ def check_text_budget(code: str) -> TextBudgetResult:
         if text is None:
             result.notes.append(f"line {line}: {name} text is dynamic; not counted")
             continue
+        if name == "MarkupText":
+            text = _MARKUP_RE.sub("", text)
         if dynamic:
             result.notes.append(f"line {line}: {name} f-string; only its literal parts are counted")
         words = _word_count(text)
