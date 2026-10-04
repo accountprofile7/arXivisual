@@ -82,6 +82,16 @@ class VisualizationPlan(BaseModel):
     narration_points: list[str] = Field(default_factory=list, description="Key points to convey")
 
 
+class VisualAidPlan(VisualizationPlan):
+    """Minimal storyboard for a short silent visual aid.
+
+    A separate subclass so VisualizationPlan's 15s minimum (narrated videos)
+    stays exactly as it was; only aids may be this short.
+    """
+
+    duration_seconds: int = Field(..., ge=3, le=15, description="Target loop length")
+
+
 class GeneratedCode(BaseModel):
     """Output from the Manim Generator agent."""
     

@@ -84,6 +84,9 @@ class ManimGenerator(BaseAgent):
 
     def __init__(self, model: str | None = None):
         super().__init__("manim_generator.md", model=model, max_tokens=8192)
+        # Dedicated template for short silent looping visual aids; the narrated
+        # template above is never touched by silent mode.
+        self.silent_prompt_template = self._load_prompt("manim_generator_silent.md")
         self.examples = self._load_examples(self.EXAMPLE_FILES, self.DEFAULT_EXAMPLE)
         self.voiceover_examples = self._load_examples(
             self.VOICEOVER_EXAMPLE_FILES,
@@ -199,8 +202,11 @@ class ManimGenerator(BaseAgent):
         voice_name: str,
         narration_style: str,
         target_duration_seconds: tuple[int, int],
+        silent_loop: bool = False,
     ) -> str:
         """Build generation prompt with mode-specific requirements."""
+        if silent_loop:
+            return self._build_silent_prompt(plan, target_duration_seconds)
         example_code = self._get_example_for_type(plan.visualization_type, voiceover_enabled)
         scene_class_name = self._generate_scene_class_name(plan.concept_name)
         tts_setup_snippet = self._get_tts_setup_snippet(tts_service, voice_name)
@@ -220,6 +226,28 @@ class ManimGenerator(BaseAgent):
             tts_setup_snippet=tts_setup_snippet,
             tts_import=tts_import,
         )
+
+    def _build_silent_prompt(
+        self,
+        plan: VisualizationPlan,
+        target_duration_seconds: tuple[int, int],
+    ) -> str:
+        """Prompt for a short silent looping visual aid (no audio concepts at all)."""
+        narrated_template = self.prompt_template
+        # _format_prompt reads self.prompt_template; no await between swap and
+        # restore, so this cannot interleave with another task.
+        self.prompt_template = self.silent_prompt_template
+        try:
+            return self._format_prompt(
+                plan_json=plan.model_dump_json(indent=2, exclude={"narration_points"}),
+                example_code=self._get_example_for_type(plan.visualization_type, False),
+                duration_seconds=plan.duration_seconds,
+                target_min_duration=target_duration_seconds[0],
+                target_max_duration=target_duration_seconds[1],
+                scene_class_name=self._generate_scene_class_name(plan.concept_name),
+            )
+        finally:
+            self.prompt_template = narrated_template
 
     async def _enrich_system_prompt_with_live_docs(
         self,
@@ -293,8 +321,11 @@ class ManimGenerator(BaseAgent):
         voice_name: str = "",
         narration_style: str = "concept_teacher",
         target_duration_seconds: tuple[int, int] = (30, 45),
+        silent_loop: bool = False,
     ) -> GeneratedCode:
         """Generate Manim code from a plan, optionally with built-in voiceovers.
+
+        ``silent_loop=True`` selects the silent looping visual-aid prompt.
 
         Uses the Dedalus SDK + Context7 MCP as the primary documentation source.
         Static docs are only used as a last-resort fallback.
@@ -309,6 +340,7 @@ class ManimGenerator(BaseAgent):
             voice_name=voice_name,
             narration_style=narration_style,
             target_duration_seconds=target_duration_seconds,
+            silent_loop=silent_loop,
         )
 
         text = await self._call_llm(prompt, system_prompt=enriched_system_prompt)
@@ -338,6 +370,7 @@ class ManimGenerator(BaseAgent):
         voice_name: str = "",
         narration_style: str = "concept_teacher",
         target_duration_seconds: tuple[int, int] = (30, 45),
+        silent_loop: bool = False,
     ) -> GeneratedCode:
         """Regenerate code with feedback from previous failures.
 
@@ -353,7 +386,17 @@ class ManimGenerator(BaseAgent):
             voice_name=voice_name,
             narration_style=narration_style,
             target_duration_seconds=target_duration_seconds,
+            silent_loop=silent_loop,
         )
+
+        if silent_loop:
+            expectations = """- Preserve concept accuracy and scene progression from the plan
+- Keep the clip silent, short, and within the target duration
+- Keep on-screen text minimal and make the last frame match the first so it loops"""
+        else:
+            expectations = """- Preserve concept accuracy and scene progression from the plan
+- Keep strict narration quality (educational, concept-focused)
+- If voiceover is enabled, keep tracker-timed play calls with run_time=tracker.duration"""
 
         error_feedback = f"""
 ## Previous Attempt Failed!
@@ -368,9 +411,7 @@ The previous code had issues. Fix them and regenerate complete code.
 {error_message}
 
 ### Mandatory Fix Expectations:
-- Preserve concept accuracy and scene progression from the plan
-- Keep strict narration quality (educational, concept-focused)
-- If voiceover is enabled, keep tracker-timed play calls with run_time=tracker.duration
+{expectations}
 """
 
         prompt = base_prompt + "\n\n" + error_feedback
