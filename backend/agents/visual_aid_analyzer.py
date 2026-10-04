@@ -36,6 +36,16 @@ def _concept_tokens(name: str) -> frozenset[str]:
     return frozenset(normalize_concept(name).split())
 
 
+# LLM output is untrusted and flows into the generator prompt; bound its size.
+_NAME_MAX = 120
+_TEXT_MAX = 200
+
+
+def _cap(value: object, limit: int) -> str:
+    text = str(value or "").strip()
+    return text[:limit].rstrip()
+
+
 class VisualAidAnalyzer(BaseAgent):
     """
     Chooses concepts in a section that a short silent looping animation would clarify.
@@ -125,7 +135,7 @@ class VisualAidAnalyzer(BaseAgent):
             if isinstance(idx, bool) or not isinstance(idx, int) or not 0 <= idx < n_paragraphs:
                 continue
 
-            name = str(data.get("concept_name") or "Unknown Concept")
+            name = _cap(data.get("concept_name"), _NAME_MAX) or "Unknown Concept"
             tokens = _concept_tokens(name)
             # Same near-duplicate rule as pipeline._dedupe_candidates
             if tokens and any(len(tokens & o) / len(tokens | o) >= 0.6 for o in seen):
@@ -137,17 +147,17 @@ class VisualAidAnalyzer(BaseAgent):
                 viz_type = VisualizationType.EQUATION
 
             raw_beats = data.get("beats")
-            beats = [str(b).strip() for b in raw_beats if b is not None] if isinstance(raw_beats, list) else []
+            beats = [_cap(b, _TEXT_MAX) for b in raw_beats if b is not None] if isinstance(raw_beats, list) else []
 
             aids.append(
                 VisualAidCandidate(
                     section_id=section_id,  # Always use the actual section ID, not LLM-generated one
                     concept_name=name,
-                    concept_description=str(data.get("concept_description") or ""),
+                    concept_description=_cap(data.get("concept_description"), _TEXT_MAX),
                     visualization_type=viz_type,
                     paragraph_index=idx,
                     beats=[b for b in beats if b],
-                    context=str(data.get("context") or ""),
+                    context=_cap(data.get("context"), _TEXT_MAX),
                 )
             )
             if tokens:

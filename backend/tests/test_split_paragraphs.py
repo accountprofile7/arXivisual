@@ -43,3 +43,24 @@ def test_stable_under_normalization():
     normalized = normalize_display_text(text)
     assert split_paragraphs(normalized) == split_paragraphs(normalize_display_text(normalized))
     assert len(split_paragraphs(normalized)) == 3
+
+
+# Cross-language contract: frontend/lib/paragraphs.ts must give the same results.
+
+
+def test_windows_line_endings():
+    assert split_paragraphs("A.\r\n\r\nB.\r\nstill B.") == ["A.", "B.\nstill B."]
+
+
+def test_display_math_opened_and_closed_on_text_lines():
+    text = "Eq: $$\na\n\nb\n$$ done.\n\nNext."
+    assert split_paragraphs(text) == ["Eq: $$\na\n\nb\n$$ done.", "Next."]
+
+
+def test_inline_pairs_do_not_open_a_block():
+    assert split_paragraphs("$$a$$ and $$b$$\n\nNext.") == ["$$a$$ and $$b$$", "Next."]
+
+
+def test_unclosed_block_falls_back_to_blank_line_split():
+    assert split_paragraphs("Open $$ x\n\nA\n\nB") == ["Open $$ x", "A", "B"]
+    assert split_paragraphs("```\ncode\n\nA") == ["```\ncode", "A"]

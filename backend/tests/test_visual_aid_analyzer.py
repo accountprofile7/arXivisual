@@ -113,3 +113,17 @@ def test_beats_coerced_and_empties_dropped(monkeypatch):
 def test_non_dict_entries_and_missing_aids_key_tolerated(monkeypatch):
     out, _ = _run(monkeypatch, SEC, ["junk", None, _aid(0)])
     assert len(out) == 1
+
+
+def test_llm_text_fields_are_length_capped(monkeypatch):
+    long = "x" * 1000
+    out, _ = _run(monkeypatch, SEC, [_aid(name=long, beats=(long,), context=long, concept_description=long)])
+    (aid,) = out
+    assert len(aid.concept_name) == 120
+    assert len(aid.concept_description) == 200 and len(aid.context) == 200
+    assert [len(b) for b in aid.beats] == [200]
+
+
+def test_zero_max_aids_makes_no_llm_call(monkeypatch):
+    out, prompts = _run(monkeypatch, SEC, [_aid()], max_aids=0)
+    assert out == [] and prompts == []
