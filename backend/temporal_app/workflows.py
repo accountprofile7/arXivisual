@@ -120,20 +120,12 @@ class PaperPipelineWorkflow:
             # owns the flag (env) decision and returns [] when off; it also
             # swallows its own failures, but a Temporal-level failure here
             # (timeout, retries exhausted) must not fail the job either.
-            # Skipped when there is no narrated video (aids never rescue or
-            # fail a job).
+            # Skipped when there is no narrated video (the early return above:
+            # aids never rescue or fail a job). Aid generation runs CONCURRENTLY
+            # with the narrated renders; aids render as soon as it returns.
+            use_aids = workflow.patched("visual-aids")
             aid_inputs: list[RenderInput] = []
-            if workflow.patched("visual-aids"):
-                try:
-                    aid_inputs = await workflow.execute_activity(
-                        generate_visual_aids_for_paper,
-                        params,
-                        start_to_close_timeout=timedelta(minutes=40),
-                        heartbeat_timeout=timedelta(minutes=8),
-                        retry_policy=_GENERATION_RETRY,
-                    )
-                except Exception as exc:
-                    workflow.logger.warning("Visual aid generation failed; continuing without aids: %s", exc)
+            kind_by_viz = {ri.viz_id: ri.kind for ri in render_inputs}
 
             # Start all renders; the render worker's concurrency cap does the
             # throttling (Temporal queues the surplus — no semaphore needed).
@@ -141,35 +133,65 @@ class PaperPipelineWorkflow:
             # death past its retry) becomes a failed RenderResult instead of
             # aborting the workflow — which used to fail the whole job and
             # strand every unfinished visualization at 'pending'.
-            all_inputs = render_inputs + aid_inputs
-            kind_by_viz = {ri.viz_id: ri.kind for ri in all_inputs}
-            render_tasks = [self._render_one(ri) for ri in all_inputs]
-
             # The terminal status is decided by NARRATED renders only (aids never
             # fail an otherwise-successful job); progress counts every render.
             succeeded = 0
             aids_succeeded = 0
             results: list[RenderResult] = []
-            for completed, task in enumerate(asyncio.as_completed(render_tasks), start=1):
-                result: RenderResult = await task
-                results.append(result)
-                if result.succeeded:
-                    if kind_by_viz.get(result.viz_id) == "visual_aid":
-                        aids_succeeded += 1
-                    else:
+            if not use_aids:
+                render_tasks = [self._render_one(ri) for ri in render_inputs]
+                for completed, task in enumerate(asyncio.as_completed(render_tasks), start=1):
+                    result: RenderResult = await task
+                    results.append(result)
+                    if result.succeeded:
                         succeeded += 1
-                await workflow.execute_activity(
-                    update_render_progress,
-                    ProgressUpdate(job_id=params.job_id, completed=completed, total=len(all_inputs)),
-                    start_to_close_timeout=timedelta(minutes=1),
-                    retry_policy=_INFRA_RETRY,
-                )
+                    await workflow.execute_activity(
+                        update_render_progress,
+                        ProgressUpdate(job_id=params.job_id, completed=completed, total=total),
+                        start_to_close_timeout=timedelta(minutes=1),
+                        retry_policy=_INFRA_RETRY,
+                    )
+            else:
+                render_futs = [asyncio.ensure_future(self._render_one(ri)) for ri in render_inputs]
+                aid_fut = asyncio.ensure_future(self._generate_aids(params))
+                ordered = [*render_futs, aid_fut]  # fixed order: deterministic replay
+                pending = set(ordered)
+                total_renders = total
+                completed = 0
+                while pending:
+                    done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                    for fut in [f for f in ordered if f in done]:
+                        if fut is aid_fut:
+                            aid_inputs = fut.result()
+                            for ri in aid_inputs:
+                                kind_by_viz[ri.viz_id] = ri.kind
+                                new_fut = asyncio.ensure_future(self._render_one(ri))
+                                ordered.append(new_fut)
+                                pending.add(new_fut)
+                            total_renders += len(aid_inputs)
+                            continue
+                        result = fut.result()
+                        results.append(result)
+                        completed += 1
+                        if result.succeeded:
+                            if kind_by_viz.get(result.viz_id) == "visual_aid":
+                                aids_succeeded += 1
+                            else:
+                                succeeded += 1
+                        # The activity keeps the stored progress monotone even
+                        # though total_renders grows when aids arrive.
+                        await workflow.execute_activity(
+                            update_render_progress,
+                            ProgressUpdate(job_id=params.job_id, completed=completed, total=total_renders),
+                            start_to_close_timeout=timedelta(minutes=1),
+                            retry_policy=_INFRA_RETRY,
+                        )
 
             # Repair pass (one round per viz, activity-gated via env): the
             # judge's specific findings drive a targeted layout fix, then a
             # re-render overwrites the video in place. A failed repair keeps
             # the original video — defective beats absent.
-            code_by_viz = {ri.viz_id: ri.manim_code for ri in all_inputs}
+            code_by_viz = {ri.viz_id: ri.manim_code for ri in [*render_inputs, *aid_inputs]}
             # Narrated only: aids are silent loops, never repaired.
             to_repair = [
                 r for r in results
@@ -205,6 +227,20 @@ class PaperPipelineWorkflow:
                 retry_policy=_INFRA_RETRY,
             )
             raise
+
+    async def _generate_aids(self, params: PipelineInput) -> list[RenderInput]:
+        """Visual aid generation; never raises (aids must not fail the job)."""
+        try:
+            return await workflow.execute_activity(
+                generate_visual_aids_for_paper,
+                params,
+                start_to_close_timeout=timedelta(minutes=40),
+                heartbeat_timeout=timedelta(minutes=8),
+                retry_policy=_GENERATION_RETRY,
+            )
+        except Exception as exc:
+            workflow.logger.warning("Visual aid generation failed; continuing without aids: %s", exc)
+            return []
 
     async def _render_one(self, ri: RenderInput) -> RenderResult:
         try:

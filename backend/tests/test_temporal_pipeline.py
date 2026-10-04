@@ -69,6 +69,9 @@ class TestWorkflowOrchestration:
         @activity.defn(name="generate_visual_aids_for_paper")
         async def aids(params: PipelineInput) -> list[RenderInput]:
             calls["aid_calls"] = calls.get("aid_calls", 0) + 1
+            calls.setdefault("events", []).append("aid_start")
+            await asyncio.sleep(calls.get("aid_delay", 0))
+            calls["events"].append("aid_done")
             return [
                 RenderInput(job_id=params.job_id, viz_id=f"aid_{i}", manim_code=f"acode{i}", kind="visual_aid")
                 for i in range(1, aid_count + 1)
@@ -77,6 +80,7 @@ class TestWorkflowOrchestration:
         @activity.defn(name="render_visualization")
         async def render(params: RenderInput) -> RenderResult:
             calls["render"].append(params.viz_id)
+            calls.setdefault("events", []).append(f"render:{params.viz_id}")
             return RenderResult(viz_id=params.viz_id, succeeded=params.viz_id not in fail_viz_ids)
 
         @activity.defn(name="update_render_progress")
@@ -142,6 +146,23 @@ class TestWorkflowOrchestration:
         assert {t for _, t in calls["progress"]} == {4}
         assert calls["finalize"] == [(2, 2)]
         assert result == "rendered 2/2 (0 flagged, 0 repaired) + 1/2 visual aids"
+
+    def test_narrated_renders_start_before_slow_aid_generation_finishes(self, calls):
+        calls["aid_delay"] = 2
+        result = asyncio.run(self._run(calls, viz_count=2, aid_count=2))
+        ev = calls["events"]
+        # Both narrated renders ran while aid generation was still in flight.
+        assert ev.index("render:viz_1") < ev.index("aid_done")
+        assert ev.index("render:viz_2") < ev.index("aid_done")
+        assert ev.index("aid_done") < ev.index("render:aid_1")
+        # Progress never goes backwards or past the total, and ends complete.
+        done = [c for c, _ in calls["progress"]]
+        totals = [t for _, t in calls["progress"]]
+        assert done == [1, 2, 3, 4]
+        assert totals == sorted(totals) and all(c <= t for c, t in calls["progress"])
+        assert calls["progress"][-1] == (4, 4)
+        assert calls["finalize"] == [(2, 2)]
+        assert result == "rendered 2/2 (0 flagged, 0 repaired) + 2/2 visual aids"
 
     def test_all_aids_failing_does_not_fail_the_job(self, calls):
         asyncio.run(self._run(calls, viz_count=1, aid_count=2, fail_viz_ids=frozenset({"aid_1", "aid_2"})))

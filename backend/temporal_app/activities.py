@@ -320,7 +320,17 @@ async def generate_visual_aids_for_paper(params: PipelineInput) -> list[RenderIn
         logger.info("Attempt %d: resuming with %d checkpointed visual aid(s)", attempt, len(existing))
     remaining = max(0, pipeline.MAX_VISUAL_AIDS - len(existing))
 
+    # The generator's per-section cap only sees this call, so on a resume it is
+    # re-applied here against the aids this run already checkpointed.
+    per_section: dict[str, int] = {}
+    for r in existing:
+        per_section[r.section_id] = per_section.get(r.section_id, 0) + 1
+
     async def checkpoint(viz) -> None:
+        if per_section.get(viz.section_id, 0) >= pipeline.VISUAL_AIDS_PER_SECTION:
+            logger.info("Section %s already has its visual aid cap; dropping %r", viz.section_id, viz.concept)
+            return
+        per_section[viz.section_id] = per_section.get(viz.section_id, 0) + 1
         viz_id = await queries.insert_visualization_with_next_index(
             paper_suffix=paper_suffix,
             paper_id=params.arxiv_id,
@@ -560,9 +570,15 @@ async def update_render_progress(params: ProgressUpdate) -> None:
     from db.connection import async_session_maker
 
     async with async_session_maker() as db:
+        progress = 0.75 + 0.20 * (params.completed / max(1, params.total))
+        # The total can grow mid-render (visual aids join after narrated renders
+        # have started), which would shrink the fraction: never go backwards.
+        job = await queries.get_job(db, params.job_id)
+        if job is not None and job.progress is not None:
+            progress = max(progress, job.progress)
         await queries.update_job_status(
             db, params.job_id,
-            progress=0.75 + 0.20 * (params.completed / max(1, params.total)),
+            progress=progress,
             sections_completed=params.completed,
         )
 

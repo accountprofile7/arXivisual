@@ -265,3 +265,32 @@ async def test_finalize_supersedes_old_aids_and_fails_pending_aids(maker, monkey
         f"viz_{SUFFIX}_3": "complete",
         f"viz_{SUFFIX}_4": "failed",
     }
+
+
+@pytest.mark.asyncio
+async def test_aid_resume_reapplies_per_section_cap(maker, monkeypatch):
+    await _seed(maker, f"viz_{SUFFIX}_1", "N1", kind="narrated")
+    await _seed(maker, f"viz_{SUFFIX}_2", "A1", kind="visual_aid", anchor=1)
+    await _seed(maker, f"viz_{SUFFIX}_3", "A2", kind="visual_aid", anchor=2)
+    monkeypatch.setattr(pipeline, "VISUAL_AIDS_PER_SECTION", 3)
+    # s0 already holds 2 aids: exactly one more fits, the next is dropped.
+    _patch_aids(monkeypatch, produce=[_gv("A3", "visual_aid", 0), _gv("A4", "visual_aid", 0)])
+    out = await activities.generate_visual_aids_for_paper(PARAMS)
+    assert len(out) == 3
+    rows = [r for r in await _rows(maker) if r.kind == "visual_aid"]
+    assert sorted(r.concept for r in rows) == ["A1", "A2", "A3"]
+
+
+@pytest.mark.asyncio
+async def test_render_progress_never_goes_backwards(maker):
+    async with maker() as db:
+        await queries.update_job_status(db, "job_1", progress=0.9)
+    # Total grew (aids joined) after a high-water mark: the bar must hold.
+    await activities.update_render_progress(activities.ProgressUpdate(job_id="job_1", completed=1, total=10))
+    async with maker() as db:
+        job = await queries.get_job(db, "job_1")
+    assert job.progress == 0.9 and job.sections_completed == 1
+    await activities.update_render_progress(activities.ProgressUpdate(job_id="job_1", completed=10, total=10))
+    async with maker() as db:
+        job = await queries.get_job(db, "job_1")
+    assert job.progress == pytest.approx(0.95)
