@@ -294,3 +294,25 @@ async def test_render_progress_never_goes_backwards(maker):
     async with maker() as db:
         job = await queries.get_job(db, "job_1")
     assert job.progress == pytest.approx(0.95)
+
+
+@pytest.mark.asyncio
+async def test_failed_aid_checkpoint_drops_only_that_aid_and_keeps_its_slot(maker, monkeypatch):
+    await _seed(maker, f"viz_{SUFFIX}_1", "N1", kind="narrated")
+    monkeypatch.setattr(pipeline, "VISUAL_AIDS_PER_SECTION", 1)
+    real = queries.insert_visualization_with_next_index
+    calls = {"n": 0}
+
+    async def flaky(**kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("db hiccup")
+        return await real(**kw)
+
+    monkeypatch.setattr(queries, "insert_visualization_with_next_index", flaky)
+    # The first insert fails; with a cap of 1 the second aid must still fit
+    # (the failed one did not consume the section's slot) and generation goes on.
+    _patch_aids(monkeypatch, produce=[_gv("A1", "visual_aid", 0), _gv("A2", "visual_aid", 0)])
+    out = await activities.generate_visual_aids_for_paper(PARAMS)
+    assert len(out) == 1
+    assert [r.concept for r in await _rows(maker) if r.kind == "visual_aid"] == ["A2"]

@@ -330,18 +330,24 @@ async def generate_visual_aids_for_paper(params: PipelineInput) -> list[RenderIn
         if per_section.get(viz.section_id, 0) >= pipeline.VISUAL_AIDS_PER_SECTION:
             logger.info("Section %s already has its visual aid cap; dropping %r", viz.section_id, viz.concept)
             return
+        try:
+            viz_id = await queries.insert_visualization_with_next_index(
+                paper_suffix=paper_suffix,
+                paper_id=params.arxiv_id,
+                section_id=viz.section_id,
+                concept=viz.concept,
+                storyboard={"raw": viz.storyboard},
+                manim_code=viz.manim_code,
+                session_maker=async_session_maker,
+                kind="visual_aid",
+                anchor_paragraph=viz.anchor_paragraph,
+            )
+        except Exception:
+            # One aid's failed insert drops just that aid (and keeps its slot);
+            # it must not abort the remaining aids of this attempt.
+            logger.exception("Could not checkpoint visual aid %r; dropping it", viz.concept)
+            return
         per_section[viz.section_id] = per_section.get(viz.section_id, 0) + 1
-        viz_id = await queries.insert_visualization_with_next_index(
-            paper_suffix=paper_suffix,
-            paper_id=params.arxiv_id,
-            section_id=viz.section_id,
-            concept=viz.concept,
-            storyboard={"raw": viz.storyboard},
-            manim_code=viz.manim_code,
-            session_maker=async_session_maker,
-            kind="visual_aid",
-            anchor_paragraph=viz.anchor_paragraph,
-        )
         render_inputs.append(
             RenderInput(job_id=params.job_id, viz_id=viz_id, manim_code=viz.manim_code, kind="visual_aid")
         )

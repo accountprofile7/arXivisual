@@ -208,6 +208,54 @@ class TestWorkflowOrchestration:
                 task_queue=TASK_QUEUE,
             )
 
+    def _history_of_run(self, calls, *, force_unpatched, aid_count=2):
+        from temporalio import workflow as tw
+        from temporalio.testing import WorkflowEnvironment
+        from temporalio.worker import Worker
+
+        pipeline_acts, render_acts = self._mock_activities(calls, viz_count=2, aid_count=aid_count)
+
+        async def go():
+            async with await WorkflowEnvironment.start_local() as env, Worker(
+                env.client, task_queue=TASK_QUEUE,
+                workflows=[PaperPipelineWorkflow], activities=pipeline_acts,
+            ), Worker(env.client, task_queue=RENDER_TASK_QUEUE, activities=render_acts):
+                handle = await env.client.start_workflow(
+                    PaperPipelineWorkflow.run,
+                    PipelineInput(job_id="job_t", arxiv_id="1706.03762"),
+                    id=f"paper-test-{uuid.uuid4().hex[:8]}",
+                    task_queue=TASK_QUEUE,
+                )
+                await handle.result()
+                return await handle.fetch_history()
+
+        if not force_unpatched:
+            return asyncio.run(go())
+        # Simulate a workflow started before the patch shipped: no marker is
+        # recorded and the legacy branch runs. (temporalio.workflow is passed
+        # through the sandbox, so this reaches the workflow's `workflow.patched`.)
+        orig = tw.patched
+        tw.patched = lambda _id: False
+        try:
+            return asyncio.run(go())
+        finally:
+            tw.patched = orig
+
+    def test_old_history_without_the_patch_replays_deterministically(self, calls):
+        from temporalio.worker import Replayer
+
+        history = self._history_of_run(calls, force_unpatched=True)
+        # The legacy branch really ran: no aid activity, 2 narrated renders only.
+        assert calls.get("aid_calls", 0) == 0 and sorted(calls["render"]) == ["viz_1", "viz_2"]
+        asyncio.run(Replayer(workflows=[PaperPipelineWorkflow]).replay_workflow(history))
+
+    def test_patched_history_replays_deterministically(self, calls):
+        from temporalio.worker import Replayer
+
+        history = self._history_of_run(calls, force_unpatched=False)
+        assert calls["aid_calls"] == 1 and "aid_1" in calls["render"]
+        asyncio.run(Replayer(workflows=[PaperPipelineWorkflow]).replay_workflow(history))
+
     def test_duplicate_workflow_id_is_rejected(self, calls):
         from temporalio.exceptions import WorkflowAlreadyStartedError
         from temporalio.testing import WorkflowEnvironment
