@@ -46,7 +46,9 @@ try:
     from .render_tester import RenderTester, RenderTestOutput
     from .section_analyzer import SectionAnalyzer
     from .spatial_validator import SpatialValidator
+    from .text_budget import TextBudgetResult, check_text_budget
     from .visual_aid_analyzer import VisualAidAnalyzer
+    from .visual_narration import visual_narration_enabled
     from .visualization_planner import VisualizationPlanner
     from .voiceover_script_validator import VoiceoverScriptValidator
 except ImportError:
@@ -57,7 +59,9 @@ except ImportError:
     from agents.render_tester import RenderTester, RenderTestOutput
     from agents.section_analyzer import SectionAnalyzer
     from agents.spatial_validator import SpatialValidator
+    from agents.text_budget import TextBudgetResult, check_text_budget
     from agents.visual_aid_analyzer import VisualAidAnalyzer
+    from agents.visual_narration import visual_narration_enabled
     from agents.visualization_planner import VisualizationPlanner
     from agents.voiceover_script_validator import VoiceoverScriptValidator
     from models.generation import (
@@ -542,6 +546,7 @@ async def generate_single_visualization(
         spatial_result: SpatialValidatorOutput | None = None
         voice_result: VoiceoverValidationOutput | None = None
         render_result: RenderTestOutput | None = None
+        budget_result: TextBudgetResult | None = None
 
         voiceover_enabled_for_generation = profile.voiceover
         max_attempts = profile.max_attempts
@@ -572,6 +577,8 @@ async def generate_single_visualization(
                     feedback_parts.append(voice_result.get_feedback_message())
                 if render_result and not render_result.success:
                     feedback_parts.append(render_result.get_feedback_message())
+                if budget_result and not budget_result.passed:
+                    feedback_parts.append(budget_result.get_feedback_message())
 
                 combined_feedback = "\n\n".join(feedback_parts) if feedback_parts else "Unknown issue; regenerate with cleaner structure and narration alignment."
                 code_result = await generator.run_with_feedback(
@@ -595,6 +602,7 @@ async def generate_single_visualization(
             spatial_result = None
             voice_result = None
             render_result = None
+            budget_result = None
 
             # Stage 1: code validation
             logger.info("    [1/4] CodeValidator: Checking syntax & structure...")
@@ -611,6 +619,17 @@ async def generate_single_visualization(
                 logger.info("    [1/4] Auto-fixed %s minor issues", len(validation.issues_fixed))
             else:
                 logger.info("    [1/4] PASSED")
+
+            # Static text budget (VISUAL_NARRATION narrated videos only; no LLM).
+            if visual_narration_enabled() and voiceover_enabled_for_generation and not profile.silent_loop:
+                budget_result = check_text_budget(current_code)
+                _report_gate(f"{gate_prefix}text_budget", attempt, budget_result.passed)
+                if not budget_result.passed:
+                    logger.warning(
+                        "    TextBudget FAILED: %s violations - regenerating",
+                        len(budget_result.violations),
+                    )
+                    continue
 
             # Stage 2: spatial validation
             if spatial_validator:
