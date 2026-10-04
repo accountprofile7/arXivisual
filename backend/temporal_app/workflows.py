@@ -40,6 +40,7 @@ with workflow.unsafe.imports_passed_through():
         RenderResult,
         RepairInput,
         finalize_job,
+        generate_visual_aids_for_paper,
         generate_visualizations_for_paper,
         ingest_paper,
         mark_job_failed,
@@ -114,24 +115,52 @@ class PaperPipelineWorkflow:
                 await self._finalize(params.job_id, succeeded=0, total=0)
                 return "no-visualizations"
 
+            # Silent looping visual aids. patched(): workflows already in
+            # flight replay without this step, deterministically. The activity
+            # owns the flag (env) decision and returns [] when off; it also
+            # swallows its own failures, but a Temporal-level failure here
+            # (timeout, retries exhausted) must not fail the job either.
+            # Skipped when there is no narrated video (aids never rescue or
+            # fail a job).
+            aid_inputs: list[RenderInput] = []
+            if workflow.patched("visual-aids"):
+                try:
+                    aid_inputs = await workflow.execute_activity(
+                        generate_visual_aids_for_paper,
+                        params,
+                        start_to_close_timeout=timedelta(minutes=40),
+                        heartbeat_timeout=timedelta(minutes=8),
+                        retry_policy=_GENERATION_RETRY,
+                    )
+                except Exception as exc:
+                    workflow.logger.warning("Visual aid generation failed; continuing without aids: %s", exc)
+
             # Start all renders; the render worker's concurrency cap does the
             # throttling (Temporal queues the surplus — no semaphore needed).
             # Each render is wrapped so ONE failed activity (timeout, worker
             # death past its retry) becomes a failed RenderResult instead of
             # aborting the workflow — which used to fail the whole job and
             # strand every unfinished visualization at 'pending'.
-            render_tasks = [self._render_one(ri) for ri in render_inputs]
+            all_inputs = render_inputs + aid_inputs
+            kind_by_viz = {ri.viz_id: ri.kind for ri in all_inputs}
+            render_tasks = [self._render_one(ri) for ri in all_inputs]
 
+            # The terminal status is decided by NARRATED renders only (aids never
+            # fail an otherwise-successful job); progress counts every render.
             succeeded = 0
+            aids_succeeded = 0
             results: list[RenderResult] = []
             for completed, task in enumerate(asyncio.as_completed(render_tasks), start=1):
                 result: RenderResult = await task
                 results.append(result)
                 if result.succeeded:
-                    succeeded += 1
+                    if kind_by_viz.get(result.viz_id) == "visual_aid":
+                        aids_succeeded += 1
+                    else:
+                        succeeded += 1
                 await workflow.execute_activity(
                     update_render_progress,
-                    ProgressUpdate(job_id=params.job_id, completed=completed, total=total),
+                    ProgressUpdate(job_id=params.job_id, completed=completed, total=len(all_inputs)),
                     start_to_close_timeout=timedelta(minutes=1),
                     retry_policy=_INFRA_RETRY,
                 )
@@ -140,8 +169,12 @@ class PaperPipelineWorkflow:
             # judge's specific findings drive a targeted layout fix, then a
             # re-render overwrites the video in place. A failed repair keeps
             # the original video — defective beats absent.
-            code_by_viz = {ri.viz_id: ri.manim_code for ri in render_inputs}
-            to_repair = [r for r in results if r.repair_recommended]
+            code_by_viz = {ri.viz_id: ri.manim_code for ri in all_inputs}
+            # Narrated only: aids are silent loops, never repaired.
+            to_repair = [
+                r for r in results
+                if r.repair_recommended and kind_by_viz.get(r.viz_id) != "visual_aid"
+            ]
             if to_repair:
                 workflow.logger.info(
                     "Repairing %d/%d defective visualization(s)", len(to_repair), total
@@ -154,8 +187,13 @@ class PaperPipelineWorkflow:
                 )
 
             await self._finalize(params.job_id, succeeded=succeeded, total=total)
-            defective = sum(1 for r in results if r.severity == "major")
-            return f"rendered {succeeded}/{total} ({defective} flagged, {len(to_repair)} repaired)"
+            defective = sum(
+                1 for r in results if r.severity == "major" and kind_by_viz.get(r.viz_id) != "visual_aid"
+            )
+            summary = f"rendered {succeeded}/{total} ({defective} flagged, {len(to_repair)} repaired)"
+            if aid_inputs:
+                summary += f" + {aids_succeeded}/{len(aid_inputs)} visual aids"
+            return summary
         except Exception as exc:
             # Mark the job failed so pollers see the truth — with the real
             # reason — then let Temporal record the workflow failure with full

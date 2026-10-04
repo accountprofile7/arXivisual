@@ -426,6 +426,8 @@ async def create_visualization(
     video_url: str | None = None,
     storyboard: dict | None = None,
     manim_code: str | None = None,
+    kind: str | None = None,
+    anchor_paragraph: int | None = None,
 ) -> Visualization:
     """Create a new visualization."""
     viz = Visualization(
@@ -437,6 +439,8 @@ async def create_visualization(
         manim_code=manim_code,
         status=status,
         video_url=video_url,
+        kind=kind,
+        anchor_paragraph=anchor_paragraph,
     )
     db.add(viz)
     await db.commit()
@@ -486,6 +490,8 @@ async def insert_visualization_with_next_index(
     manim_code: str | None,
     session_maker,
     attempts: int = 5,
+    kind: str | None = None,
+    anchor_paragraph: int | None = None,
 ) -> str:
     """INSERT a checkpoint row under the first unused ``viz_{suffix}_{N}`` id.
 
@@ -504,6 +510,7 @@ async def insert_visualization_with_next_index(
                 await create_visualization(
                     db, viz_id=viz_id, paper_id=paper_id, section_id=section_id,
                     concept=concept, status="pending", storyboard=storyboard, manim_code=manim_code,
+                    kind=kind, anchor_paragraph=anchor_paragraph,
                 )
                 return viz_id
             except IntegrityError as exc:

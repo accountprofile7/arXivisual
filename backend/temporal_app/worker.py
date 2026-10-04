@@ -40,6 +40,7 @@ import analytics
 from jobs.worker import parse_render_concurrency
 from temporal_app.activities import (
     finalize_job,
+    generate_visual_aids_for_paper,
     generate_visualizations_for_paper,
     ingest_paper,
     mark_job_failed,
@@ -56,6 +57,7 @@ from temporal_app.workflows import RENDER_TASK_QUEUE, TASK_QUEUE, PaperPipelineW
 PIPELINE_ACTIVITIES = [
     ingest_paper,
     generate_visualizations_for_paper,
+    generate_visual_aids_for_paper,
     update_render_progress,
     finalize_job,
     mark_job_failed,
