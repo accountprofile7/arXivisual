@@ -7,6 +7,8 @@ socket-blocking fixture is tracked in the backlog under Testing & CI.)
 
 import os
 
+# Keep a developer's local backend/.env out of the suite (it is read at app import).
+os.environ.setdefault("ARXIVISUAL_SKIP_DOTENV", "1")
 os.environ["LANGFUSE_TRACING_ENABLED"] = "false"
 # Product analytics (PostHog) and Application Insights are NO-OPs without
 # their env vars; make sure a developer's shell never switches them on here.

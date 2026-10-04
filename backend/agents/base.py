@@ -11,13 +11,9 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # Load .env file if it exists
-try:
-    from dotenv import load_dotenv
-    env_path = Path(__file__).parent.parent / ".env"
-    if env_path.exists():
-        load_dotenv(env_path)
-except ImportError:
-    pass  # python-dotenv not installed, use system env vars
+from agents.dotenv_loader import load_backend_dotenv  # noqa: E402
+
+load_backend_dotenv()
 
 
 # Default model per provider. For Azure this is the *deployment name* you

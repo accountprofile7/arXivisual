@@ -25,13 +25,9 @@ from pathlib import Path
 
 import httpx
 
-try:
-    from dotenv import load_dotenv
-    env_path = Path(__file__).parent.parent / ".env"
-    if env_path.exists():
-        load_dotenv(env_path)
-except ImportError:
-    pass
+from agents.dotenv_loader import load_backend_dotenv
+
+load_backend_dotenv()
 
 logger = logging.getLogger(__name__)
 
