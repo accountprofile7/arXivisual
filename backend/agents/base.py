@@ -1,5 +1,6 @@
 """Base agent class with provider-switchable LLM support (Azure OpenAI / Claude / Claude CLI / Dedalus)."""
 
+import contextlib
 import json
 import logging
 import os
@@ -326,20 +327,68 @@ _CLAUDE_CLI_SYSTEM_PROMPT = (
     "<system_instructions> block, treat it as your system prompt and follow it exactly. "
     "Reply with only what is asked for. You have no tools."
 )
-# Kept despite matching the *TOKEN* scrub: the subscription credential from `claude setup-token`.
-_CLAUDE_CLI_ENV_KEEP = frozenset({"CLAUDE_CODE_OAUTH_TOKEN"})
-_CLAUDE_CLI_ENV_PREFIXES = (
-    "ANTHROPIC_", "AZURE_", "S3_", "LANGFUSE_", "DEDALUS_", "OPENAI_", "CONTEXT7_", "ELEVENLABS_",
+# The child env is an ALLOWLIST (names matched case-insensitively; Windows env names are):
+# only what the CLI needs to start, find its login and reach the network. Every app secret
+# (ANTHROPIC_*, AZURE_*, DATABASE_URL, S3_*, APPLICATIONINSIGHTS_*, AWS_*, ...) is dropped
+# by default, and an ANTHROPIC_API_KEY here would silently switch billing to the API.
+_CLAUDE_CLI_ENV_ALLOW = frozenset({
+    "PATH", "PATHEXT", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "TEMP", "TMP", "TMPDIR",
+    "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA",
+    "USERNAME", "USER", "LOGNAME", "SHELL", "OS", "PROCESSOR_ARCHITECTURE",
+    "LANG", "LANGUAGE", "TERM",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
+    "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE",
+    "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR",
+})
+_CLAUDE_CLI_ENV_ALLOW_PREFIXES = ("CLAUDE_CODE_", "LC_", "PROGRAMFILES", "PROGRAMW6432")
+# Belt and braces on top of --tools "": deny the built-in tools by name.
+_CLAUDE_CLI_DISALLOWED_TOOLS = (
+    "Bash,PowerShell,REPL,Read,Write,Edit,MultiEdit,NotebookEdit,Glob,Grep,"
+    "WebFetch,WebSearch,Task,Agent,TodoWrite"
 )
-_CLAUDE_CLI_ENV_SUBSTRINGS = ("SECRET", "TOKEN", "PASSWORD", "API_KEY", "CREDENTIAL")
-_CLAUDE_CLI_ENV_EXACT = frozenset({"DATABASE_URL"})
+_CLAUDE_CLI_SYSTEM_TAG_RE = re.compile(r"<(\s*/?\s*system_instructions\s*>)", re.IGNORECASE)
+_CLAUDE_CLI_SHIM_EXE_RE = re.compile(r'"%dp0%[\\/]([^"]+?\.exe)"', re.IGNORECASE)
 
 _claude_cli_semaphores: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
 
 
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
 def _claude_cli_executable() -> str | None:
-    """Path of the `claude` launcher (shutil.which honours PATHEXT: claude.exe/.cmd)."""
-    return shutil.which("claude")
+    """Path of the `claude` launcher, preferring the real .exe.
+
+    On Windows `which("claude")` is usually the npm `claude.cmd` shim: killing it on
+    timeout would only kill cmd.exe and orphan claude.exe. So prefer a .exe from PATH,
+    then the .exe the npm shim points at, and fall back to the shim itself."""
+    found = shutil.which("claude")
+    if not found or not found.lower().endswith((".cmd", ".bat")):
+        return found
+    exe = shutil.which("claude.exe")
+    if exe:
+        return exe
+    try:
+        text = Path(found).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return found
+    m = _CLAUDE_CLI_SHIM_EXE_RE.search(text)
+    if m:
+        target = Path(found).parent / m.group(1).replace("\\", os.sep)
+        if target.is_file():
+            return str(target)
+    return found
+
+
+def _claude_cli_kill_tree(pid: int) -> None:
+    """Kill the process and its children (Windows: taskkill /T; the child may be a shim)."""
+    if not _is_windows():
+        return
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(pid)],
+            capture_output=True, check=False, timeout=15,
+        )
 
 
 def _claude_cli_model() -> str:
@@ -347,23 +396,12 @@ def _claude_cli_model() -> str:
 
 
 def _claude_cli_env() -> dict[str, str]:
-    """os.environ minus every credential: with ANTHROPIC_API_KEY/AUTH_TOKEN present
-    the CLI would bill the API instead of the subscription, and the child needs
-    none of the app's secrets."""
-    env: dict[str, str] = {}
-    for key, value in os.environ.items():
-        upper = key.upper()
-        if upper in _CLAUDE_CLI_ENV_KEEP:
-            env[key] = value
-        elif (
-            upper in _CLAUDE_CLI_ENV_EXACT
-            or upper.startswith(_CLAUDE_CLI_ENV_PREFIXES)
-            or any(frag in upper for frag in _CLAUDE_CLI_ENV_SUBSTRINGS)
-        ):
-            continue
-        else:
-            env[key] = value
-    return env
+    """Allowlisted subset of os.environ for the child (see _CLAUDE_CLI_ENV_ALLOW)."""
+    return {
+        k: v for k, v in os.environ.items()
+        if k.upper() in _CLAUDE_CLI_ENV_ALLOW
+        or k.upper().startswith(_CLAUDE_CLI_ENV_ALLOW_PREFIXES)
+    }
 
 
 def _claude_cli_timeout() -> float:
@@ -402,6 +440,7 @@ def _claude_cli_command(exe: str, model: str) -> list[str]:
         "--model", model,
         "--effort", os.environ.get("ANTHROPIC_EFFORT") or "medium",
         "--tools", "",
+        "--disallowedTools", _CLAUDE_CLI_DISALLOWED_TOOLS,
         "--strict-mcp-config",
         "--no-session-persistence",
         "--safe-mode",
@@ -415,11 +454,13 @@ def _claude_cli_stdin(prompt: str, system_prompt: str, system_suffix: str, json_
         prompt += _ANTHROPIC_JSON_INSTRUCTION
     system = system_prompt + system_suffix
     if system:
+        # Untrusted text (a paper) must not be able to close/reopen the system block.
+        prompt = _CLAUDE_CLI_SYSTEM_TAG_RE.sub("<\u200b\\1", prompt)
         prompt = f"<system_instructions>\n{system}\n</system_instructions>\n\n{prompt}"
     return prompt.encode("utf-8")
 
 
-def _claude_cli_tail(data: bytes | str | None, limit: int = 500) -> str:
+def _claude_cli_tail(data: bytes | str | None, limit: int = 300) -> str:
     if isinstance(data, bytes):
         data = data.decode("utf-8", errors="replace")
     return (data or "").strip()[-limit:]
@@ -430,14 +471,13 @@ def _claude_cli_parse(returncode: int | None, stdout: bytes, stderr: bytes) -> t
     err = _claude_cli_tail(stderr)
     if returncode:
         raise RuntimeError(
-            f"claude CLI exited with code {returncode}: {err or _claude_cli_tail(stdout)}"
+            f"claude CLI exited with code {returncode}: {err}"
         )
     try:
         data = json.loads(stdout.decode("utf-8", errors="replace"))
     except ValueError as e:
         raise RuntimeError(
-            f"claude CLI returned unparseable output ({e}); stderr: {err}; "
-            f"stdout tail: {_claude_cli_tail(stdout, 200)}"
+            f"claude CLI returned unparseable output ({e}); stderr: {err}"
         ) from e
     if isinstance(data, list):  # some versions emit the whole message array
         data = next(
@@ -491,7 +531,7 @@ async def _claude_cli_call_async(
     model, argv, stdin, timeout = _claude_cli_prepare(prompt, system_prompt, system_suffix, json_mode)
     async with _claude_cli_semaphore():
         t0 = time.monotonic()
-        with tempfile.TemporaryDirectory(prefix="claude_cli_") as cwd:
+        with tempfile.TemporaryDirectory(prefix="claude_cli_", ignore_cleanup_errors=True) as cwd:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
                 stdin=asyncio.subprocess.PIPE,
@@ -506,8 +546,10 @@ async def _claude_cli_call_async(
                 raise RuntimeError(f"claude CLI timed out after {timeout:.0f}s (killed)") from None
             finally:
                 if proc.returncode is None:
+                    _claude_cli_kill_tree(proc.pid)
                     proc.kill()
-                    await proc.wait()
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(proc.wait(), 10)
         output, usage = _claude_cli_parse(proc.returncode, stdout, stderr)
     _claude_cli_log_response(model, output, usage, time.monotonic() - t0)
     return output
@@ -518,15 +560,24 @@ def _claude_cli_call_sync(
 ) -> str:
     model, argv, stdin, timeout = _claude_cli_prepare(prompt, system_prompt, system_suffix, json_mode)
     t0 = time.monotonic()
-    with tempfile.TemporaryDirectory(prefix="claude_cli_") as cwd:
+    with tempfile.TemporaryDirectory(prefix="claude_cli_", ignore_cleanup_errors=True) as cwd:
+        proc = subprocess.Popen(
+            argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cwd=cwd, env=_claude_cli_env(),
+        )
         try:
-            proc = subprocess.run(
-                argv, input=stdin, capture_output=True, cwd=cwd,
-                env=_claude_cli_env(), timeout=timeout, check=False,
-            )
+            stdout, stderr = proc.communicate(stdin, timeout=timeout)
         except subprocess.TimeoutExpired:
+            _claude_cli_kill_tree(proc.pid)
+            proc.kill()
+            with contextlib.suppress(Exception):
+                proc.communicate(timeout=10)
             raise RuntimeError(f"claude CLI timed out after {timeout:.0f}s (killed)") from None
-    output, usage = _claude_cli_parse(proc.returncode, proc.stdout, proc.stderr)
+        except BaseException:
+            _claude_cli_kill_tree(proc.pid)
+            proc.kill()
+            raise
+    output, usage = _claude_cli_parse(proc.returncode, stdout, stderr)
     _claude_cli_log_response(model, output, usage, time.monotonic() - t0)
     return output
 
