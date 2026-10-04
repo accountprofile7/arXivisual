@@ -672,9 +672,10 @@ async def generate_single_visualization(
 
                 if voice_result.needs_regeneration:
                     logger.warning(
-                        "    [3/4] FAILED: alignment=%.2f educational=%.2f",
+                        "    [3/4] FAILED: alignment=%.2f educational=%.2f issues=%s",
                         voice_result.score_alignment,
                         voice_result.score_educational,
+                        "; ".join(voice_result.issues_found) or "none",
                     )
                     continue
 

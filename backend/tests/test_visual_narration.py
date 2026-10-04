@@ -176,6 +176,11 @@ def test_retry_prompt_unchanged_when_off():
 def test_generator_prompt_has_layout_and_contrast_rules_when_on(monkeypatch):
     monkeypatch.setenv("VISUAL_NARRATION", "1")
     prompt = _narrated(_generator())
+    # Narration phrasing matches the narration check's hard rules.
+    assert 'never begin a phrase with "Display", "Show"' in prompt
+    assert "Every phrase has at least 4 words" in prompt
+    # Tags stay clear of outlines and borders.
+    assert "Tags never touch lines" in prompt
     # Opening: title alone, cleared before the diagram, diagram below it.
     assert "appears ALONE" in prompt
     assert ".animate.to_edge(UP).scale(" in prompt

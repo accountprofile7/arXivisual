@@ -17,6 +17,8 @@ The plan contains scenes whose description starts with "VISUAL AID:". Each is a 
 ### Pacing: a visible change every few words
 - Split the narration into many short phrases of about 4-8 words, each in its own `with self.voiceover(text="...") as tracker:` block, and give EVERY phrase at least one animation (appear, move, grow, shrink, pulse, connect) with `run_time=tracker.duration` (or split into a few plays that add up to it). Never narrate over a still frame.
 - Narration names what is moving ("this slab shrinks to a quarter") and never reads out on-screen text.
+- A narration check rejects any phrase that starts with an animation command: never begin a phrase with "Display", "Show", "Fade", "Animate", "Create", "Draw", "Move" or "Write". Describe what the viewer sees instead ("The slab shrinks", "A grid slides across").
+- Every phrase has at least 4 words.
 
 ### Text budget (a static check enforces this)
 - No sentences, bullets, `Paragraph`, `BulletedList` or `Title` cards. An optional concept name may flash for about 1 second at the start, as a `Text` of 3 words or fewer, then leaves.
@@ -40,6 +42,7 @@ Keep every spatial, safe-area and LaTeX rule above. The non-"VISUAL AID:" scenes
 - Repeated or stacked blocks ("this block repeats N times"): draw a few simplified block icons at legible size (for example 3 `RoundedRectangle` icons plus a "..." tag) instead of scaling the full detailed diagram down.
 - Do NOT `FadeOut` the center stage between scenes (that would break the build-up); only a corner analogy's temporary parts are removed when it shrinks to its resting icon.
 - Labels follow their shape: when a shape is replaced or transformed (for example the 256 slab becoming the 64 slab), `Transform` / `ReplacementTransform` its label too (or `FadeOut` the old label in the same play). Never `Write` / `FadeIn` a second label at the spot where one already sits, so a tag is never drawn twice on top of itself.
+- Tags never touch lines: a tag sits OUTSIDE every shape, outline and border with at least 0.3 clearance, and never on or across a line. Do not draw a dashed or solid frame around the center-stage block; if a group needs a boundary, give it a faint background `SurroundingRectangle(..., buff=0.4, stroke_opacity=0.4)` and place every tag outside it (below it with `next_to(frame, DOWN, buff=0.3)`), never on its edge.
 - The final recap lives ONLY in the BR corner. In the last beat nothing new is added over the center stage except highlights (`Indicate`, `Circumscribe`, `set_stroke`): no row of stacked block icons across the top, nothing over arcs or arrows already drawn.
 
 ### Few-shot snippet: corner helper + phrase-paced voiceover pair (inside `construct`)
