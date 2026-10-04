@@ -590,8 +590,14 @@ async def upsert_visualization(
     video_url: str | None = None,
     storyboard: dict | None = None,
     manim_code: str | None = None,
+    kind: str | None = None,
+    anchor_paragraph: int | None = None,
 ) -> Visualization:
-    """Create or update a visualization."""
+    """Create or update a visualization.
+
+    ``kind``/``anchor_paragraph`` are only written when ``kind`` is given, so
+    callers that don't know about visual aids leave existing values alone.
+    """
     result = await db.execute(
         select(Visualization).where(Visualization.id == viz_id)
     )
@@ -613,6 +619,9 @@ async def upsert_visualization(
             viz.storyboard = storyboard
         if manim_code:
             viz.manim_code = manim_code
+        if kind is not None:
+            viz.kind = kind
+            viz.anchor_paragraph = anchor_paragraph
     else:
         # Create new visualization
         viz = Visualization(
@@ -624,6 +633,8 @@ async def upsert_visualization(
             manim_code=manim_code,
             status=status,
             video_url=video_url,
+            kind=kind,
+            anchor_paragraph=anchor_paragraph,
         )
         db.add(viz)
 
