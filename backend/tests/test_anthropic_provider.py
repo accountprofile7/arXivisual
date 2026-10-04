@@ -227,3 +227,93 @@ def test_sync_path(monkeypatch):
     kw = client.calls[0]
     assert kw["system"][0]["cache_control"] == {"type": "ephemeral"}
     assert "JSON" in kw["messages"][0]["content"]
+
+
+# --- two-part system prompt (cache breakpoint on the stable prefix) ----------
+
+def test_system_suffix_is_second_uncached_block(monkeypatch):
+    client = _install(monkeypatch)
+    asyncio.run(base.call_llm("hi", system_prompt="STABLE", system_suffix="\n\nPER-PLAN"))
+    assert client.calls[0]["system"] == [
+        {"type": "text", "text": "STABLE", "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": "\n\nPER-PLAN"},
+    ]
+
+
+def test_empty_suffix_omits_second_block(monkeypatch):
+    client = _install(monkeypatch)
+    asyncio.run(base.call_llm("hi", system_prompt="STABLE", system_suffix=""))
+    assert len(client.calls[0]["system"]) == 1
+
+
+def test_sync_system_suffix(monkeypatch):
+    client = _install(monkeypatch, sync=True)
+    base.call_llm_sync("hi", system_prompt="S", system_suffix="X")
+    assert [b["text"] for b in client.calls[0]["system"]] == ["S", "X"]
+    assert "cache_control" not in client.calls[0]["system"][1]
+
+
+def test_azure_system_is_exact_old_concatenation(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "azure")
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "x")
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://e")
+    calls = []
+
+    class _Completions:
+        async def create(self, **kw):
+            calls.append(kw)
+            msg = SimpleNamespace(content="out")
+            return SimpleNamespace(choices=[SimpleNamespace(message=msg)])
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=_Completions()))
+    monkeypatch.setattr(base, "_get_azure_client", lambda: client)
+    stable, suffix = "STABLE REF", "\n\n" + "=" * 80 + "\n# LIVE\n\ndocs"
+    asyncio.run(base.call_llm("hi", system_prompt=stable, system_suffix=suffix))
+    assert calls[0]["messages"][0] == {"role": "system", "content": stable + suffix}
+
+
+# --- cache warm-up -------------------------------------------------------------
+
+class _CreateClient:
+    def __init__(self, exc=None):
+        self.calls = []
+        self._exc = exc
+        self.beta = SimpleNamespace(messages=SimpleNamespace(create=self._create))
+
+    async def _create(self, **kw):
+        self.calls.append(kw)
+        if self._exc:
+            raise self._exc
+        return _msg()
+
+
+def test_prewarm_sends_max_tokens_zero_with_cached_block(monkeypatch):
+    _install(monkeypatch)
+    client = _CreateClient()
+    monkeypatch.setattr(base, "_get_anthropic_client", lambda: client)
+    asyncio.run(base.prewarm_system_cache("STABLE"))
+    kw = client.calls[0]
+    assert kw["max_tokens"] == 0
+    assert kw["system"] == [{"type": "text", "text": "STABLE", "cache_control": {"type": "ephemeral"}}]
+    assert kw["model"] == "claude-sonnet-5-5"
+    assert kw["messages"] and kw["messages"][0]["role"] == "user"
+    for banned in ("thinking", "temperature", "top_p", "top_k"):
+        assert banned not in kw
+
+
+def test_prewarm_noop_on_azure(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "azure")
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "x")
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://e")
+    client = _CreateClient()
+    monkeypatch.setattr(base, "_get_anthropic_client", lambda: client)
+    asyncio.run(base.prewarm_system_cache("STABLE"))
+    assert client.calls == []
+
+
+def test_prewarm_swallows_and_logs_errors(monkeypatch, caplog):
+    _install(monkeypatch)
+    monkeypatch.setattr(base, "_get_anthropic_client", lambda: _CreateClient(RuntimeError("boom")))
+    with caplog.at_level("WARNING"):
+        asyncio.run(base.prewarm_system_cache("STABLE"))
+    assert "warm-up failed" in caplog.text

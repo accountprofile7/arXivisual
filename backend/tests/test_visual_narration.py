@@ -37,6 +37,7 @@ def _generator():
     g = ManimGenerator.__new__(ManimGenerator)
     g.prompt_template = (_PROMPTS / "manim_generator.md").read_text()
     g.silent_prompt_template = (_PROMPTS / "manim_generator_silent.md").read_text()
+    g.system_prompt = "stable system"
     g.silent_example = "# silent example"
     g.examples = {VisualizationType.DATA_FLOW: "# plain example"}
     g.voiceover_examples = {VisualizationType.DATA_FLOW: "# voice example"}
@@ -137,13 +138,13 @@ def _retry_prompt(g):
     captured = {}
 
     async def fake_enrich(plan):
-        return "system"
+        return ""
 
-    async def fake_call(prompt, system_prompt=None):
+    async def fake_call(prompt, system_prompt=None, system_suffix=""):
         captured["prompt"] = prompt
         return "from manim import *\nclass A(Scene):\n    pass\n"
 
-    g._enrich_system_prompt_with_live_docs = fake_enrich
+    g._live_docs_suffix = fake_enrich
     g._call_llm = fake_call
     asyncio.run(g.run_with_feedback(plan=_plan(), previous_code="x", error_message="bad"))
     return captured["prompt"]

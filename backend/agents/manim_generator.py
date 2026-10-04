@@ -276,11 +276,23 @@ class ManimGenerator(BaseAgent):
         finally:
             self.prompt_template = narrated_template
 
-    async def _enrich_system_prompt_with_live_docs(
+    @property
+    def stable_system_prompt(self) -> str:
+        """The cross-concept system prefix (the static Manim reference).
+
+        Byte-identical for every plan/type in a process: it is the block the
+        Anthropic prompt cache is keyed on, and what the pipeline pre-warms.
+        Anything per-plan belongs in ``_live_docs_suffix``."""
+        return self.system_prompt
+
+    async def _live_docs_suffix(
         self,
         plan: VisualizationPlan,
     ) -> str:
         """
+        Per-plan system suffix: live Manim docs ('' when unavailable). The
+        caller sends it AFTER the cached stable prompt (``system_suffix``).
+
         Fetch live Manim docs via Dedalus SDK + Context7 MCP as the PRIMARY
         documentation source, with static manim_reference.md as fallback only.
 
@@ -318,11 +330,10 @@ class ManimGenerator(BaseAgent):
                     "(Dedalus SDK + Context7 MCP)",
                     len(live_docs),
                 )
-                # Merge original system prompt with live docs
-                # Keep the base system prompt's instructions and add live docs as primary reference
+                # Appended to the stable system prompt (concatenated on Azure/Dedalus,
+                # a separate uncached block on Anthropic) as the primary reference
                 return (
-                    self.system_prompt
-                    + "\n\n"
+                    "\n\n"
                     + "=" * 80
                     + "\n"
                     + "# LIVE MANIM API REFERENCE (Context7 MCP + Dedalus SDK)\n"
@@ -336,9 +347,9 @@ class ManimGenerator(BaseAgent):
         except Exception as exc:
             logger.warning("  Live doc fetch failed (%s), falling back to static docs", exc)
 
-        # Fallback: static manim_reference.md (only used when live sources fail)
+        # Fallback: static manim_reference.md alone (only when live sources fail)
         logger.info("  Using static manim_reference.md as fallback")
-        return self.system_prompt
+        return ""
 
     async def run(
         self,
@@ -358,7 +369,7 @@ class ManimGenerator(BaseAgent):
         Static docs are only used as a last-resort fallback.
         """
         # Fetch live Manim docs via Dedalus + Context7 before generating
-        enriched_system_prompt = await self._enrich_system_prompt_with_live_docs(plan)
+        system_suffix = await self._live_docs_suffix(plan)
 
         prompt = self._build_prompt(
             plan=plan,
@@ -370,7 +381,9 @@ class ManimGenerator(BaseAgent):
             silent_loop=silent_loop,
         )
 
-        text = await self._call_llm(prompt, system_prompt=enriched_system_prompt)
+        text = await self._call_llm(
+            prompt, system_prompt=self.stable_system_prompt, system_suffix=system_suffix
+        )
 
         code = self._clean_code(text)
         actual_class_name = self._extract_scene_class_name(code)
@@ -404,7 +417,7 @@ class ManimGenerator(BaseAgent):
         Also uses Dedalus SDK + Context7 MCP for live documentation.
         """
         # Fetch live docs for the feedback loop too
-        enriched_system_prompt = await self._enrich_system_prompt_with_live_docs(plan)
+        system_suffix = await self._live_docs_suffix(plan)
 
         base_prompt = self._build_prompt(
             plan=plan,
@@ -448,7 +461,9 @@ The previous code had issues. Fix them and regenerate complete code.
 
         prompt = base_prompt + "\n\n" + error_feedback
 
-        text = await self._call_llm(prompt, system_prompt=enriched_system_prompt)
+        text = await self._call_llm(
+            prompt, system_prompt=self.stable_system_prompt, system_suffix=system_suffix
+        )
 
         code = self._clean_code(text)
         actual_class_name = self._extract_scene_class_name(code)

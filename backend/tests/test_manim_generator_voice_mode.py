@@ -71,6 +71,7 @@ def _prompt_generator():
     g = ManimGenerator.__new__(ManimGenerator)
     g.prompt_template = (_PROMPTS / "manim_generator.md").read_text()
     g.silent_prompt_template = (_PROMPTS / "manim_generator_silent.md").read_text()
+    g.system_prompt = "stable system"
     g.silent_example = "# silent example"
     g.examples = {VisualizationType.DATA_FLOW: "# plain example"}
     g.voiceover_examples = {VisualizationType.DATA_FLOW: "# voice example"}
@@ -112,13 +113,13 @@ def test_silent_feedback_prompt_has_no_narration_wording():
     captured = {}
 
     async def fake_enrich(plan):
-        return "system"
+        return ""
 
-    async def fake_call(prompt, system_prompt=None):
+    async def fake_call(prompt, system_prompt=None, system_suffix=""):
         captured["prompt"] = prompt
         return "```python\nfrom manim import *\nclass A(Scene):\n    def construct(self):\n        pass\n```"
 
-    g._enrich_system_prompt_with_live_docs = fake_enrich
+    g._live_docs_suffix = fake_enrich
     g._call_llm = fake_call
     result = asyncio.run(
         g.run_with_feedback(
@@ -141,13 +142,13 @@ def test_narrated_feedback_prompt_still_mentions_narration():
     captured = {}
 
     async def fake_enrich(plan):
-        return "system"
+        return ""
 
-    async def fake_call(prompt, system_prompt=None):
+    async def fake_call(prompt, system_prompt=None, system_suffix=""):
         captured["prompt"] = prompt
         return "from manim import *\nclass A(Scene):\n    pass\n"
 
-    g._enrich_system_prompt_with_live_docs = fake_enrich
+    g._live_docs_suffix = fake_enrich
     g._call_llm = fake_call
     asyncio.run(g.run_with_feedback(plan=_plan(), previous_code="x", error_message="bad"))
     assert "Keep strict narration quality" in captured["prompt"]
@@ -168,3 +169,41 @@ def test_silent_prompt_uses_dedicated_silent_example():
     assert "voice" not in example.lower() and "narrat" not in example.lower()
     result = CodeValidator().validate(example)
     assert result.is_valid and not result.needs_regeneration
+
+
+def test_generator_sends_stable_prompt_and_live_docs_suffix_separately(monkeypatch):
+    import agents.manim_generator as mg
+
+    async def fake_docs(topic, max_tokens, use_dedalus):
+        return "LIVE DOCS " + topic + " " * 100  # > 100 chars
+
+    monkeypatch.setattr(mg, "get_manim_docs", fake_docs)
+    g = _prompt_generator()
+    g.system_prompt = "STABLE MANIM REFERENCE"
+    seen = []
+
+    async def fake_call(prompt, system_prompt=None, system_suffix=""):
+        seen.append((system_prompt, system_suffix))
+        return "from manim import *\nclass A(Scene):\n    pass\n"
+
+    g._call_llm = fake_call
+    p1 = _plan()
+    p2 = _plan().model_copy(update={"concept_name": "Other", "visualization_type": VisualizationType.EQUATION})
+    asyncio.run(g.run(plan=p1))
+    asyncio.run(g.run_with_feedback(plan=p2, previous_code="x", error_message="bad"))
+    # Stable part identical across concepts/types and equal to the exposed property.
+    assert {s for s, _ in seen} == {"STABLE MANIM REFERENCE"} == {g.stable_system_prompt}
+    # Per-plan docs live only in the suffix; old concatenation preserved.
+    assert "LIVE DOCS" in seen[0][1] and seen[0][1] != seen[1][1]
+    assert seen[0][1].startswith("\n\n" + "=" * 80 + "\n# LIVE MANIM API REFERENCE")
+
+
+def test_generator_suffix_empty_when_live_docs_unavailable(monkeypatch):
+    import agents.manim_generator as mg
+
+    async def fake_docs(topic, max_tokens, use_dedalus):
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(mg, "get_manim_docs", fake_docs)
+    g = _prompt_generator()
+    assert asyncio.run(g._live_docs_suffix(_plan())) == ""

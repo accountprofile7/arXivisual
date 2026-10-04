@@ -223,8 +223,27 @@ def _get_anthropic_sync_client():
     return _anthropic_sync_client
 
 
+def _anthropic_system_blocks(system_prompt: str, system_suffix: str = "") -> list[dict]:
+    """System text blocks. The breakpoint sits on the LAST block of the stable
+    prefix: it and everything before it is cached, the (per-request) suffix
+    after it is not."""
+    blocks: list[dict] = []
+    if system_prompt:
+        blocks.append(
+            {"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}
+        )
+    if system_suffix:
+        blocks.append({"type": "text", "text": system_suffix})
+    return blocks
+
+
 def _anthropic_request_kwargs(
-    model: str, prompt: str, system_prompt: str, max_tokens: int, json_mode: bool = False
+    model: str,
+    prompt: str,
+    system_prompt: str,
+    max_tokens: int,
+    json_mode: bool = False,
+    system_suffix: str = "",
 ) -> dict:
     if json_mode:
         # Claude has no schema-free JSON mode; call_llm_json's repair+retry backs this up.
@@ -239,11 +258,10 @@ def _anthropic_request_kwargs(
         # as are temperature/top_p/top_k and assistant prefill.
         "output_config": {"effort": os.environ.get("ANTHROPIC_EFFORT", "medium")},
     }
-    if system_prompt:
-        # The large Manim reference is re-sent on every generation call: cache it.
-        kwargs["system"] = [
-            {"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}
-        ]
+    if system_prompt or system_suffix:
+        # The large Manim reference is re-sent on every generation call: cache it
+        # (per-plan text goes in the uncached suffix block after the breakpoint).
+        kwargs["system"] = _anthropic_system_blocks(system_prompt, system_suffix)
     return kwargs
 
 
@@ -329,9 +347,15 @@ async def call_llm(
     max_tokens: int = 4096,
     name: str | None = None,
     json_mode: bool = False,
+    system_suffix: str = "",
 ) -> str:
-    """Async LLM call routed through the configured provider."""
+    """Async LLM call routed through the configured provider.
+
+    ``system_suffix`` is appended to ``system_prompt``: Azure/Dedalus see the
+    plain concatenation; Anthropic sends it as a second, uncached system block
+    so ``system_prompt`` alone is the cached, cross-request prefix."""
     provider = get_provider()
+    combined_system = system_prompt + system_suffix
     input_words = len(prompt.split())
     t0 = time.monotonic()
 
@@ -342,7 +366,7 @@ async def call_llm(
             client = _get_azure_client()
             resp = await client.chat.completions.create(
                 **_with_trace_name(
-                    _azure_request_kwargs(resolved, prompt, system_prompt, max_tokens, json_mode),
+                    _azure_request_kwargs(resolved, prompt, combined_system, max_tokens, json_mode),
                     name,
                 )
             )
@@ -360,7 +384,9 @@ async def call_llm(
         logger.info(f"[LLM] Calling anthropic/{resolved} ({input_words} input words, max_tokens={max_tokens})")
         try:
             client = _get_anthropic_client()
-            kw = _anthropic_request_kwargs(resolved, prompt, system_prompt, max_tokens, json_mode)
+            kw = _anthropic_request_kwargs(
+                resolved, prompt, system_prompt, max_tokens, json_mode, system_suffix
+            )
             # Streaming avoids HTTP timeouts on long generations.
             async with client.beta.messages.stream(**kw) as stream:
                 msg = await stream.get_final_message()
@@ -379,7 +405,7 @@ async def call_llm(
         result = await runner.run(
             input=prompt,
             model=dedalus_model,
-            instructions=system_prompt,
+            instructions=combined_system,
             max_tokens=max_tokens,
         )
         elapsed = time.monotonic() - t0
@@ -399,16 +425,19 @@ def call_llm_sync(
     max_tokens: int = 4096,
     name: str | None = None,
     json_mode: bool = False,
+    system_suffix: str = "",
 ) -> str:
-    """Synchronous LLM call routed through the configured provider."""
+    """Synchronous LLM call routed through the configured provider
+    (``system_suffix``: see call_llm)."""
     provider = get_provider()
+    combined_system = system_prompt + system_suffix
 
     if provider == "azure":
         resolved = _azure_model(model)
         client = _get_azure_sync_client()
         resp = client.chat.completions.create(
             **_with_trace_name(
-                _azure_request_kwargs(resolved, prompt, system_prompt, max_tokens, json_mode),
+                _azure_request_kwargs(resolved, prompt, combined_system, max_tokens, json_mode),
                 name,
             )
         )
@@ -418,7 +447,9 @@ def call_llm_sync(
         t0 = time.monotonic()
         try:
             client = _get_anthropic_sync_client()
-            kw = _anthropic_request_kwargs(resolved, prompt, system_prompt, max_tokens, json_mode)
+            kw = _anthropic_request_kwargs(
+                resolved, prompt, system_prompt, max_tokens, json_mode, system_suffix
+            )
             with client.beta.messages.stream(**kw) as stream:
                 msg = stream.get_final_message()
             return _anthropic_output(msg, resolved, time.monotonic() - t0)
@@ -434,10 +465,43 @@ def call_llm_sync(
     result = asyncio.run(runner.run(
         input=prompt,
         model=_dedalus_model(model or DEFAULT_DEDALUS_MODEL),
-        instructions=system_prompt,
+        instructions=combined_system,
         max_tokens=max_tokens,
     ))
     return result.final_output or ""
+
+
+_PREWARM_USER_MESSAGE = "ok"
+
+
+async def prewarm_system_cache(system_prompt: str, model: str | None = None) -> None:
+    """Best-effort Anthropic prompt-cache warm-up for ``system_prompt``.
+
+    One ``max_tokens=0`` request with the same cached system block the real
+    calls use, so a burst of concurrent calls reads the cache instead of each
+    writing it. No-op on other providers; never raises (warming must not fail
+    a job). The cache is model- and prefix-exact."""
+    try:
+        if get_provider() != "anthropic" or not system_prompt:
+            return
+        resolved = _anthropic_model_for(model)
+        client = _get_anthropic_client()
+        msg = await client.beta.messages.create(
+            model=resolved,
+            max_tokens=0,
+            system=_anthropic_system_blocks(system_prompt),
+            messages=[{"role": "user", "content": _PREWARM_USER_MESSAGE}],
+            betas=[_ANTHROPIC_FALLBACKS_BETA],
+        )
+        u = getattr(msg, "usage", None)
+        logger.info(
+            f"[LLM] anthropic/{resolved} cache warm-up "
+            f"(in={getattr(u, 'input_tokens', None)} "
+            f"cache_read={getattr(u, 'cache_read_input_tokens', None)} "
+            f"cache_write={getattr(u, 'cache_creation_input_tokens', None)})"
+        )
+    except Exception as e:
+        logger.warning(f"[LLM] cache warm-up failed (ignored): {type(e).__name__}: {e}")
 
 
 # An escaped pair is consumed whole (first alternative) so its second
@@ -635,6 +699,7 @@ class BaseAgent:
         system_prompt: str | None = None,
         max_tokens: int | None = None,
         json_mode: bool = False,
+        system_suffix: str = "",
     ) -> str:
         """Call the LLM via the configured provider (async)."""
         return await call_llm(
@@ -644,6 +709,7 @@ class BaseAgent:
             max_tokens=max_tokens or self.max_tokens,
             name=self._trace_name,
             json_mode=json_mode,
+            system_suffix=system_suffix,
         )
 
     def _call_llm_sync(
