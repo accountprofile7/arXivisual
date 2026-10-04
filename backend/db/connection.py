@@ -72,12 +72,17 @@ _ADDED_COLUMNS: list[tuple[str, str, str]] = [
 def _add_missing_columns(sync_conn) -> None:
     """Idempotently ALTER TABLE ... ADD COLUMN for each missing _ADDED_COLUMNS entry."""
     insp = inspect(sync_conn)
+    # Several replicas (API + worker) run init_db concurrently on Postgres; IF NOT
+    # EXISTS makes a lost race a no-op instead of a startup crash. SQLite lacks it.
+    if_not_exists = "IF NOT EXISTS " if sync_conn.dialect.name == "postgresql" else ""
     existing: dict[str, set[str]] = {}
     for table, column, ddl_type in _ADDED_COLUMNS:
         if table not in existing:
             existing[table] = {c["name"] for c in insp.get_columns(table)}
         if column not in existing[table]:
-            sync_conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}"))
+            sync_conn.execute(
+                text(f"ALTER TABLE {table} ADD COLUMN {if_not_exists}{column} {ddl_type}")
+            )
             existing[table].add(column)
 
 
