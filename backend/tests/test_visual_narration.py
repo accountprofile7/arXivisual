@@ -102,6 +102,14 @@ def test_planner_prompt_has_visual_aid_block_when_on(monkeypatch, value):
     assert "EXACTLY 3" in prompt
     assert '"VISUAL AID: "' in prompt
     assert "proportional" in prompt
+    # Center stage built from phrase-sized beats, 3 corner analogies, BR recap.
+    assert "CENTER STAGE" in prompt
+    assert "ONE narration phrase of 4-8 words + ONE visible change" in prompt
+    for corner in ("TL", "TR", "BL", "BR"):
+        assert corner in prompt
+    assert "Recap (BR)" in prompt
+    assert "everyday analogy" in prompt
+    assert "2-5 second" in prompt
     # Original content intact, block sits before the output format, template restored.
     assert "## Narration Points Guidance" in prompt
     assert prompt.index("Visual Aid Moments") < prompt.index("## Output Format (JSON only)")
@@ -169,7 +177,7 @@ def test_generator_prompt_has_layout_and_contrast_rules_when_on(monkeypatch):
     monkeypatch.setenv("VISUAL_NARRATION", "1")
     prompt = _narrated(_generator())
     # Opening: title alone, cleared before the diagram, diagram below it.
-    assert "title appears ALONE" in prompt
+    assert "appears ALONE" in prompt
     assert ".animate.to_edge(UP).scale(" in prompt
     assert "BEFORE any diagram element appears" in prompt
     assert "below y = 2.5" in prompt
@@ -180,11 +188,52 @@ def test_generator_prompt_has_layout_and_contrast_rules_when_on(monkeypatch):
     assert "`font_size` of at least 28" in prompt
     assert "buff of 0.15 or more" in prompt
     # Final composition.
-    assert "between 40% and 85% of the frame width" in prompt
-    assert "centered vertically in the safe area" in prompt
+    assert "Final composition" in prompt
     assert "simplified block icons at legible size" in prompt
-    assert "`FadeOut` all previous content" in prompt
+    assert "Do NOT `FadeOut` the center stage" in prompt
 
 
 def test_layout_and_contrast_rules_absent_when_off():
-    assert "title appears ALONE" not in _narrated(_generator())
+    assert "appears ALONE" not in _narrated(_generator())
+
+
+def test_generator_prompt_has_layout_pacing_and_budget_when_on(monkeypatch):
+    monkeypatch.setenv("VISUAL_NARRATION", "1")
+    prompt = _narrated(_generator())
+    # Layout convention with concrete coordinates.
+    assert "14.2 wide x 8 tall" in prompt
+    assert "7.5 x 5.0" in prompt
+    assert "3.2 x 2.0" in prompt
+    assert "`UL`, `UR`, `DL`, `DR`" in prompt
+    assert "`buff` of at least 0.2" in prompt
+    assert "named constants and helpers" in prompt
+    assert "never cleared" in prompt.lower() or "It is never cleared" in prompt
+    assert "Indicate" in prompt and "Circumscribe" in prompt
+    assert "shrinks to a small resting icon" in prompt
+    # Pacing.
+    assert "4-8 words" in prompt
+    assert "Never narrate over a still frame" in prompt
+    # Text budget numbers.
+    assert "3 words or fewer" in prompt
+    assert "15 tag words or fewer" in prompt
+    assert "Paragraph" in prompt
+    # Vocabulary.
+    assert "funnels" in prompt and "no external images" in prompt
+
+
+def test_few_shot_snippet_passes_code_validator():
+    import re
+
+    from agents.code_validator import CodeValidator
+    from agents.text_budget import check_text_budget
+
+    block = (_PROMPTS / "visual_narration_generator.md").read_text(encoding="utf-8")
+    snippet = re.search(r"```python\n(.*?)```", block, re.S).group(1)
+    body = "\n".join("        " + ln for ln in snippet.splitlines())
+    code = (
+        "from manim import *\nfrom manim_voiceover import VoiceoverScene\n"
+        "class Demo(VoiceoverScene):\n    def construct(self):\n" + body + "\n"
+    )
+    result = CodeValidator().validate(code)
+    assert result.is_valid and not result.needs_regeneration, result.issues_found
+    assert check_text_budget(result.code).passed

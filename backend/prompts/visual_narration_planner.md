@@ -1,22 +1,26 @@
-## Visual Aid Moments (REQUIRED)
-This video must contain EXACTLY 3 "visual aid moments", spread across the video (one early, one in the middle, one late; never two in adjacent scenes). A visual aid moment is a beat where the narration names a concrete quantity or structure taken from the section text and the screen DRAWS it instead of writing it.
+## Visual Aid Moments (REQUIRED): center stage + corner analogies
+The viewer should follow the idea from shapes and motion alone; the narration only names what they are already seeing. Plan the video on a fixed screen layout:
+- CENTER STAGE (about 7.5 x 5 units, middle of the frame): ONE continuous diagram of the real mechanism from the paper. It is built up beat by beat over the whole video. It is never cleared, only added to and highlighted.
+- FOUR CORNERS (about 3.2 x 2 units each): short, self-contained analogy animations (2-5 seconds, vector shapes only) that pop in, explain one idea by everyday comparison, then shrink to a small resting icon that stays on screen as a legend. Top-left (TL), top-right (TR) and bottom-left (BL) are the 3 visual aids. Bottom-right (BR) is the final recap.
 
-For each of the 3 moments, decide:
-1. The term or quantity, copied from the section text (a channel count, kernel size, layer count, dimension, number of heads, a skip connection, and so on).
-2. Its geometric depiction, where size, count or position encodes the value:
-   - a size or width: proportional sizing (a 256-channel tensor is a thick slab, a 64-channel tensor a thin slab, thickness proportional to the number)
-   - a kernel or filter: a grid of cells (1x1 is a single cell, 3x3 is a 3 by 3 grid)
-   - channels or depth: stacked slabs or layers
-   - a data path or shortcut: an arrow that arcs around the blocks and joins at a circle containing "+"
-   - a count: that many repeated shapes, or a proportional bar
-3. The narration line that says it (12-24 words, plain language, naming the quantity).
+### 1. Center stage: a sequence of phrase-sized beats
+Write the center-stage build-up as an ordered list of beats. Each beat = ONE narration phrase of 4-8 words + ONE visible change (a shape appears, moves, grows, shrinks, splits, merges, connects or pulses). No phrase is narrated over a still frame. Spread the beats across the scenes, 4-6 beats per scene. Quantities are shown by proportional size or by counts of repeated shapes (a 256-channel tensor is a thick slab, a 64-channel tensor a thin slab; thickness proportional to the number), kernels by grids of cells (1x1 is one cell, 3x3 is a 3 by 3 grid), shortcuts by an arrow that arcs around blocks and joins at a circle containing "+".
 
-Encode each moment inside the scene description of the scene that shows it. That scene's description MUST start with "VISUAL AID: " and then give (a), (b) and (c) explicitly, for example:
-"VISUAL AID: 1x1 convolution reduces 256 channels to 64. Draw a thick slab (depth proportional to 256) that visibly compresses into a thin slab (proportional to 64); show a 1x1 kernel as a single cell next to a 3x3 kernel grid. Narration: a one by one convolution squeezes 256 channels down to just 64."
-Also include each moment's narration line in `narration_points`.
+### 2. Exactly 3 corner analogy moments (TL, TR, BL)
+Each moment is one scene whose description MUST start with "VISUAL AID: " and then states all four of:
+a. The everyday analogy (funnel, road with a bridge, pipe and valve, magnifying window, stack of cards, scale), built from simple vector shapes.
+b. The paper quantity or operation it explains, copied from the section text (a channel count, kernel size, layer count, skip connection, and so on).
+c. Which center-stage element it highlights (pulse/glow) while the corner animation plays, so analogy and real mechanism are on screen together.
+d. Its 2-5 second corner animation, and the corner it uses (TL, TR or BL, in that order across the video).
+Example: "VISUAL AID: (TL) squeeze. Analogy: a funnel narrows a wide stream of 256 dots into 64 dots. Explains: the 1x1 convolution reduces 256 channels to 64. Center stage: the first slab pulses and shrinks to a thin slab in sync. Corner animation: dots flow into the funnel and come out as 64 (3 s), then the funnel shrinks to a small icon in the TL corner. Narration: this thick slab squeezes down to a quarter."
+Also include each moment's narration phrases in `narration_points`.
 
-Rules for visual aid moments:
-- Exactly 3 scenes have descriptions starting with "VISUAL AID: ". Not 2, not 4.
-- The shape appears first and carries the meaning. Text is allowed only as a short tag (3 words or fewer, or a number) AFTER the shape is on screen, never as a substitute for it.
-- Use simple primitives that render reliably: Rectangle, Square grids, Arrow, Circle with a "+". No photo-real or 3D-perspective effects.
-- The other scenes (framing, transitions, takeaway) stay as described above.
+### 3. Recap (BR)
+The last scene is the recap: the three resting icons gather into a tiny summary of the whole block in the BR corner while the finished center-stage diagram is highlighted once from input to output. Its description does NOT start with "VISUAL AID: ".
+
+Rules:
+- EXACTLY 3 scenes have descriptions starting with "VISUAL AID: ". Not 2, not 4. They appear in the order TL, TR, BL, spread across the video (never in adjacent scenes unless the plan has few scenes).
+- Words on screen are rare: no sentences, bullets, paragraphs or title cards. At most a tag of 3 words or fewer, or a number or symbol (256, 64, 1x1, +), shown AFTER the shape is on screen. About 15 tag words or fewer for the whole video.
+- Color carries meaning consistently between center stage and corners (the same color for the same quantity), and is never the only cue; shape or motion repeats it.
+- Corners never overlap the center stage. Use simple primitives that render reliably (Rectangle, Square grids, Circle, Polygon, Arc, Line, Dot, Arrow); no external images, no photo-real or 3D effects.
+- Target length stays 30-60 seconds. The other scenes (framing, transitions) stay as described above.
