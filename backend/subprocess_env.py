@@ -45,9 +45,10 @@ def filter_env(
 ) -> dict[str, str]:
     """Subset of ``environ`` (default: ``os.environ`` now) whose names are allowed.
 
-    ``allow`` and ``prefixes`` are upper-case; names are compared upper-cased.
+    Names, ``allow`` and ``prefixes`` are all compared upper-cased.
     """
-    allowed = frozenset(allow)
+    allowed = frozenset(a.upper() for a in allow)
+    prefixes = tuple(p.upper() for p in prefixes)
     source = os.environ if environ is None else environ
     return {
         k: v for k, v in source.items()

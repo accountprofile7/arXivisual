@@ -24,6 +24,8 @@ POST /api/process  (api/routes.py: rate-limit + dedupe [api/throttle.py] + stale
   The render and dry-run children run LLM-generated code, so their env is an allowlist
   (`subprocess_env.scrubbed_env`: OS, locale, proxy/CA, LaTeX/font vars); app secrets are not inherited,
   only the derived `OPENAI_*` TTS key. Hygiene, not a sandbox: same uid, so `/proc` is still readable.
+  A var the child genuinely needs (e.g. `TEXINPUTS`, `TZ`) must be added to `_ALLOW`. manim-voiceover's
+  OpenAI service runs `load_dotenv` from the render tmpdir upward, so never point `TMPDIR` under a dir holding a `.env`.
 - **Rendering**: local subprocess (`RENDER_MODE=local`, the default and what prod runs). Modal exists
   (`rendering/modal_runner.py`) only as an unused optional mode. **There is no Redis anywhere.**
 - **DB**: Postgres (asyncpg) when `DATABASE_URL` set, SQLite `./arxiviz.db` locally. No alembic — schema is

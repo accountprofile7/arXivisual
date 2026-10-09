@@ -8,6 +8,7 @@ construct() runs.
 """
 
 import asyncio
+import shutil
 
 import pytest
 
@@ -69,28 +70,25 @@ class TestDryRunExecution:
         result = asyncio.run(tester.test_render(scene))
         assert result.success, f"{result.error_type}: {result.error_message}"
 
-    def test_driver_reaches_a_verdict_under_the_allowlist(self, tmp_path):
-        # The gate fails OPEN when the driver dies before printing a sentinel,
-        # so an allowlist that breaks `import manim` would pass silently through
-        # test_render. Run the driver directly and demand the OK sentinel.
-        import subprocess
-        import sys
+    # The gate fails OPEN when the driver dies before printing a sentinel, so an
+    # env that breaks `import manim` (or LaTeX, or fonts) would still "pass".
+    # A real verdict means no "produced no verdict" warning was logged.
+    def test_driver_reaches_a_verdict_under_the_allowlist(self, tester, caplog):
+        with caplog.at_level("WARNING", logger=rt_module.__name__):
+            result = asyncio.run(tester.test_render(VALID_SCENE))
+        assert result.success
+        assert "produced no verdict" not in caplog.text
 
-        from agents.dry_run_driver import SENTINEL_OK
-        from subprocess_env import scrubbed_env
-
-        scene = tmp_path / "scene.py"
-        scene.write_text(VALID_SCENE, encoding="utf-8")
-        env = scrubbed_env()
-        env["OPENAI_API_KEY"] = "dry-run-placeholder"
-        result = subprocess.run(
-            [sys.executable, str(rt_module._DRIVER_PATH), str(scene), "ValidScene"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=120, cwd=tmp_path, env=env, stdin=subprocess.DEVNULL,
+    @pytest.mark.skipif(not shutil.which("latex"), reason="needs a LaTeX install")
+    def test_latex_and_text_reach_a_verdict_under_the_allowlist(self, tester, caplog):
+        scene = VALID_SCENE.replace(
+            "box = RoundedRectangle(width=2, height=1)",
+            'box = VGroup(MathTex(r"\\frac{QK^T}{\\sqrt{d_k}}"), Text("256")).arrange(DOWN)',
         )
-        assert result.returncode == 0, result.stderr[-2000:]
-        assert SENTINEL_OK in result.stdout, result.stderr[-2000:]
-
+        with caplog.at_level("WARNING", logger=rt_module.__name__):
+            result = asyncio.run(tester.test_render(scene))
+        assert result.success, f"{result.error_type}: {result.error_message}"
+        assert "produced no verdict" not in caplog.text
 
     def test_numpy_truth_value_bug_is_caught(self, tester):
         result = asyncio.run(tester.test_render(NUMPY_BUG_SCENE))
