@@ -230,6 +230,7 @@ def test_few_shot_snippet_passes_code_validator():
     import re
 
     from agents.code_validator import CodeValidator
+    from agents.frame_check import check_frames
     from agents.text_budget import check_text_budget
 
     block = (_PROMPTS / "visual_narration_generator.md").read_text(encoding="utf-8")
@@ -242,6 +243,7 @@ def test_few_shot_snippet_passes_code_validator():
     result = CodeValidator().validate(code)
     assert result.is_valid and not result.needs_regeneration, result.issues_found
     assert check_text_budget(result.code).passed
+    assert check_frames(result.code).passed
 
 
 def _snippet():
@@ -289,3 +291,17 @@ def test_generator_block_states_overrides_and_render_defect_rules(monkeypatch):
     assert "never drawn twice on top of itself" in prompt
     assert "recap lives ONLY in the BR corner" in prompt
     assert "nothing new is added over the center stage except highlights" in prompt
+
+
+def test_prompts_ban_frames_when_on(monkeypatch):
+    monkeypatch.setenv("VISUAL_NARRATION", "1")
+    gen = _narrated(_generator())
+    assert "No frames (a static check enforces this)" in gen
+    assert "Never construct a `SurroundingRectangle`" in gen
+    assert "If the plan asks for an outline, frame, dashed box or placeholder, leave it out" in gen
+    # The old rule handed out a frame recipe.
+    assert "SurroundingRectangle(..., buff=0.4" not in gen
+    plan = _planner_prompt(_planner())
+    assert "No frames: never plan an outline, frame, dashed box, placeholder" in plan
+    assert "The first scene draws the real input shape itself" in plan
+    assert "Never list `SurroundingRectangle` or `DashedVMobject` in `elements`" in plan

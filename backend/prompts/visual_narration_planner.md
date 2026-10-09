@@ -22,5 +22,6 @@ Rules:
 - EXACTLY 3 scenes have descriptions starting with "VISUAL AID: ". Not 2, not 4. They appear in the order TL, TR, BL, spread across the video (never in adjacent scenes unless the plan has few scenes).
 - Words on screen are rare: no sentences, bullets, paragraphs or title cards. At most a tag of 3 words or fewer, or a number or symbol (256, 64, 1x1, +), shown AFTER the shape is on screen. About 15 tag words or fewer for the whole video.
 - Color carries meaning consistently between center stage and corners (the same color for the same quantity), and is never the only cue; shape or motion repeats it.
+- No frames: never plan an outline, frame, dashed box, placeholder, ghost shape or "workspace" rectangle, around anything or in place of anything. The first scene draws the real input shape itself. Never list `SurroundingRectangle` or `DashedVMobject` in `elements`.
 - Corners never overlap the center stage. Use simple primitives that render reliably (Rectangle, Square grids, Circle, Polygon, Arc, Line, Dot, Arrow); no external images, no photo-real or 3D effects.
 - Target length stays 30-60 seconds. The other scenes (framing, transitions) stay as described above.

@@ -42,6 +42,7 @@ try:
     from ..models.voiceover import VoiceoverValidationOutput
     from .base import prewarm_system_cache
     from .code_validator import CodeValidator
+    from .frame_check import FrameCheckResult, check_frames
     from .manim_generator import ManimGenerator
     from .render_tester import RenderTester, RenderTestOutput
     from .section_analyzer import SectionAnalyzer
@@ -55,6 +56,7 @@ except ImportError:
     sys.path.insert(0, str(Path(__file__).parent.parent))
     from agents.base import prewarm_system_cache
     from agents.code_validator import CodeValidator
+    from agents.frame_check import FrameCheckResult, check_frames
     from agents.manim_generator import ManimGenerator
     from agents.render_tester import RenderTester, RenderTestOutput
     from agents.section_analyzer import SectionAnalyzer
@@ -547,6 +549,7 @@ async def generate_single_visualization(
         voice_result: VoiceoverValidationOutput | None = None
         render_result: RenderTestOutput | None = None
         budget_result: TextBudgetResult | None = None
+        frame_result: FrameCheckResult | None = None
 
         voiceover_enabled_for_generation = profile.voiceover
         max_attempts = profile.max_attempts
@@ -579,6 +582,8 @@ async def generate_single_visualization(
                     feedback_parts.append(render_result.get_feedback_message())
                 if budget_result and not budget_result.passed:
                     feedback_parts.append(budget_result.get_feedback_message())
+                if frame_result and not frame_result.passed:
+                    feedback_parts.append(frame_result.get_feedback_message())
 
                 combined_feedback = "\n\n".join(feedback_parts) if feedback_parts else "Unknown issue; regenerate with cleaner structure and narration alignment."
                 code_result = await generator.run_with_feedback(
@@ -603,6 +608,7 @@ async def generate_single_visualization(
             voice_result = None
             render_result = None
             budget_result = None
+            frame_result = None
 
             # Stage 1: code validation
             logger.info("    [1/4] CodeValidator: Checking syntax & structure...")
@@ -620,7 +626,7 @@ async def generate_single_visualization(
             else:
                 logger.info("    [1/4] PASSED")
 
-            # Static text budget (VISUAL_NARRATION narrated videos only; no LLM).
+            # Static text budget and frame check (VISUAL_NARRATION narrated videos only; no LLM).
             if visual_narration_enabled() and voiceover_enabled_for_generation and not profile.silent_loop:
                 budget_result = check_text_budget(current_code)
                 _report_gate(f"{gate_prefix}text_budget", attempt, budget_result.passed)
@@ -630,6 +636,14 @@ async def generate_single_visualization(
                     logger.warning(
                         "    TextBudget FAILED: %s violations",
                         len(budget_result.violations),
+                    )
+                # Same soft-gate contract as the text budget.
+                frame_result = check_frames(current_code)
+                _report_gate(f"{gate_prefix}frame_check", attempt, frame_result.passed)
+                if not frame_result.passed:
+                    logger.warning(
+                        "    FrameCheck FAILED: %s",
+                        "; ".join(frame_result.violations),
                     )
 
             # Stage 2: spatial validation
@@ -703,8 +717,12 @@ async def generate_single_visualization(
             else:
                 logger.info("    [4/4] RenderTester: Skipped")
 
-            if budget_result and not budget_result.passed and attempt < max_attempts - 1:
-                logger.warning("    Other gates passed but text budget failed - regenerating")
+            soft_failed = [
+                name for name, r in (("text budget", budget_result), ("frame check", frame_result))
+                if r and not r.passed
+            ]
+            if soft_failed and attempt < max_attempts - 1:
+                logger.warning("    Other gates passed but %s failed - regenerating", " and ".join(soft_failed))
                 continue
 
             code_result.code = current_code
