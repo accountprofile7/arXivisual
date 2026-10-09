@@ -338,6 +338,22 @@ def test_zoom_up_insets_fit_and_never_cover_other_corners():
                 continue
             assert not _overlap(inset, _flush_box(*other, iw, ih, *safe))
             assert not _overlap(inset, _flush_box(*other, cw, ch, *safe))
+    assert round(safe[1] - ih, 6) >= 0.8  # the middle band |y| < 0.8 is never covered
+
+
+def test_inset_numbers_in_the_prose_match_the_constants(monkeypatch):
+    ns = _snippet_constants()
+    sx, sy, iw, ih = ns["SAFE_X"], ns["SAFE_Y"], ns["INSET_W"], ns["INSET_H"]
+    x_in, y_in = round(sx - iw, 2), round(sy - ih, 2)  # inner edges of an inset
+    monkeypatch.setenv("VISUAL_NARRATION", "1")
+    gen = _narrated(_generator())
+    assert f"inset centers at x = +/-{sx - iw / 2:.2f}, y = +/-{sy - ih / 2:.2f}" in gen
+    assert f"insets span |x| in [{x_in}, {sx}], |y| in [{y_in}, {sy}]" in gen
+    assert f"no inset covers the middle band |y| < {y_in}" in gen
+    keep_x, keep_y = round(x_in - 0.3, 2), round(y_in - 0.3, 2)  # 0.3 clearance
+    assert f"TL inset, keep it right of x = -{keep_x} or below y = {keep_y}" in gen
+    assert f"TR, left of x = {keep_x} or below y = {keep_y}" in gen
+    assert f"BL, right of x = -{keep_x} or above y = -{keep_y}" in gen
 
 
 def test_prompts_describe_the_zoom_up_inset_when_on(monkeypatch):
@@ -348,13 +364,17 @@ def test_prompts_describe_the_zoom_up_inset_when_on(monkeypatch):
     assert "GROWS, PLAYS, then SETTLES" in gen
     assert "FadeIn(card, analogy, target_position=corner_anchor(corner), scale=0.35)" in gen
     assert "FadeOut(card, *temporary_parts, target_position=corner_anchor(corner), scale=0.35)" in gen
-    assert "the center-stage part it highlights must sit outside that inset" in gen
+    assert "The center-stage part it highlights stays at least 0.3 clear of that inset, even while it pulses" in gen
+    assert "Add nothing new to the center stage inside the active inset while it plays" in gen
+    assert "give the finished analogy `set_z_index(1)` so the card never covers it" in gen
+    assert "fill_color=BLACK, fill_opacity=1.0)" in gen
     assert "The one panel allowed is an inset's filled card with `stroke_width=0`" in gen
     assert "A pinned title must be gone before the first inset grows" in gen
     plan = _planner_prompt(_planner())
     assert "grows out of its corner into a large inset (about 4.7 x 2.7 units)" in plan
     assert "Only the active inset may cover the edge of the center stage" in plan
     assert "an inset's filled dark card is a background, not a frame" in plan
+    assert "Bottom-right (BR) is the final recap and stays small, with no inset" in plan
 
 
 # Assertions spliced into the snippet: they run inside construct() under the dry run.
@@ -362,7 +382,10 @@ _AUTHORED_CHECKS = """\
 assert np.allclose(card.get_corner(UL), [-SAFE_X, SAFE_Y, 0])
 assert card.get_left()[0] <= analogy.get_left()[0] and analogy.get_right()[0] <= card.get_right()[0]
 assert card.get_bottom()[1] <= analogy.get_bottom()[1] and analogy.get_top()[1] <= card.get_top()[1]
-assert slab.get_left()[0] >= card.get_right()[0] or slab.get_top()[1] <= card.get_bottom()[1]
+assert card.get_fill_opacity() == 1.0
+# Indicate pulses the slab 1.2x about its center; the pulse stays 0.3 clear of the card.
+assert (slab.get_left()[0] - 0.1 * slab.width >= card.get_right()[0] + 0.3
+        or slab.get_top()[1] + 0.1 * slab.height <= card.get_bottom()[1] - 0.3)
 assert min(m.z_index for m in analogy.get_family()) > card.z_index
 """
 _SETTLED_CHECKS = """\
