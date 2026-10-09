@@ -69,14 +69,16 @@ def _short(node: ast.expr, limit: int = 60) -> str:
 class _Checker:
     def __init__(self, tree: ast.AST):
         self.tree = tree
-        # name -> every value it is bound to; assigned value -> its target name
-        self.bindings: dict[str, list[ast.expr]] = {}
+        # name -> its assignments in source order; assigned value -> its target name
+        self.bindings: dict[str, list[ast.Assign]] = {}
         self.target_of: dict[int, str] = {}
         for node in ast.walk(tree):
             if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
                 name = node.targets[0].id
-                self.bindings.setdefault(name, []).append(node.value)
+                self.bindings.setdefault(name, []).append(node)
                 self.target_of[id(node.value)] = name
+        for assigns in self.bindings.values():
+            assigns.sort(key=lambda a: (a.lineno, a.col_offset))
         self.parents: dict[int, ast.AST] = {
             id(child): parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)
         }
@@ -94,25 +96,36 @@ class _Checker:
                 return node
             node = outer
 
-    def rect_shape(self, node: ast.expr, seen: frozenset[str] = frozenset()) -> str | None:
-        """The rectangle-family shape ``node`` evaluates to, if any."""
+    def binding_at(self, name: ast.Name) -> ast.expr | None:
+        """The value last assigned to ``name`` above where it is read (scopes are not tracked)."""
+        before = [
+            a for a in self.bindings.get(name.id, [])
+            if (a.end_lineno, a.end_col_offset) <= (name.lineno, name.col_offset)
+        ]
+        return before[-1].value if before else None
+
+    def rect_shape(self, node: ast.expr) -> str | None:
+        """The rectangle-family shape ``node`` evaluates to, if any.
+
+        Each name step moves to an assignment that ends above it, so this
+        always terminates and does linear work.
+        """
         if isinstance(node, ast.Name):
-            if node.id in seen:
-                return None
-            for value in self.bindings.get(node.id, []):
-                shape = self.rect_shape(value, seen | {node.id})
-                if shape:
-                    return shape
-            return None
+            value = self.binding_at(node)
+            return self.rect_shape(value) if value is not None else None
         root = _root_call(node)
         if isinstance(root, ast.Call):
             name = _call_name(root)
             if name in RECT_SHAPES:
                 return name
+            # ``b.copy()`` / ``b.scale(1.2)``: a method chain on a name.
+            if isinstance(root.func, ast.Attribute) and isinstance(root.func.value, ast.Name):
+                return self.rect_shape(root.func.value)
         return None
 
     def run(self) -> FrameCheckResult:
         result = FrameCheckResult(passed=True)
+        found: list[tuple[int, str]] = []
         reported: set[int] = set()
         for node in ast.walk(self.tree):
             if not isinstance(node, ast.Call) or _call_name(node) != "DashedVMobject":
@@ -127,9 +140,10 @@ class _Checker:
                 continue
             reported.add(id(_root_call(arg)))
             via = "" if isinstance(_root_call(arg), ast.Call) else f" ({_short(arg)} is a {shape})"
-            result.violations.append(
-                f"line {node.lineno}: DashedVMobject({_short(arg)}) draws a dashed box or placeholder{via}"
-            )
+            found.append((
+                node.lineno,
+                f"line {node.lineno}: DashedVMobject({_short(arg)}) draws a dashed box or placeholder{via}",
+            ))
         for node in ast.walk(self.tree):
             if not isinstance(node, ast.Call) or _call_name(node) != "SurroundingRectangle":
                 continue
@@ -137,7 +151,8 @@ class _Checker:
                 continue
             target = self.target_of.get(id(self.outermost(node)))
             label = f"{target} = " if target else ""
-            result.violations.append(f"line {node.lineno}: {label}SurroundingRectangle(...) draws a frame")
+            found.append((node.lineno, f"line {node.lineno}: {label}SurroundingRectangle(...) draws a frame"))
+        result.violations = [msg for _, msg in sorted(found, key=lambda f: f[0])]
         result.passed = not result.violations
         return result
 

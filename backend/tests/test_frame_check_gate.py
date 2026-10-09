@@ -38,6 +38,21 @@ def test_last_attempt_with_frame_still_runs_downstream_gates(monkeypatch):
     assert gen.runs == 1
 
 
+def test_frame_miss_with_attempts_left_runs_render_then_retries(monkeypatch):
+    render = _Render(success=True)
+    _, gen, _ = _run_with_render(monkeypatch, [FRAMED, GOOD], render, max_attempts=2)
+    assert render.calls == 2
+    assert gen.runs == 2
+    assert "FRAMES ARE NOT ALLOWED" in gen.feedback[0]
+
+
+def test_frame_and_render_feedback_are_combined(monkeypatch):
+    render = _Render(success=False)
+    _, gen, _ = _run_with_render(monkeypatch, [FRAMED, GOOD], render, max_attempts=2)
+    assert "FRAMES ARE NOT ALLOWED" in gen.feedback[0]
+    assert "boom" in gen.feedback[0]
+
+
 def test_frame_and_budget_feedback_are_combined(monkeypatch):
     both = OVER_BUDGET.replace(
         '        self.add(Text(', "        self.add(SurroundingRectangle(Dot()))\n        self.add(Text("

@@ -143,7 +143,7 @@ def test_silent_aid_profile_never_runs_gate(monkeypatch):
         )
     )
     assert gen.runs == 1
-    assert not any(g.endswith("text_budget") for g in gates)
+    assert not any(g.endswith(("text_budget", "frame_check")) for g in gates)
 
 
 class _Render:

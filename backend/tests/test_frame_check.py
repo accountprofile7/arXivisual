@@ -43,7 +43,7 @@ self.play(Create(box))
 
 
 @pytest.mark.parametrize("body, expected", [
-    (FRAME_VIA_NAME, ["DashedVMobject(frame)", "frame = SurroundingRectangle"]),
+    (FRAME_VIA_NAME, ["frame = SurroundingRectangle", "DashedVMobject(frame)"]),
     (DASHED_INLINE_THEN_MOVED, ["DashedVMobject(Rectangle("]),
     (DASHED_FLUENT_CHAIN, ["DashedVMobject(Rectangle(width=SW"]),
     (RECAP_BOX, ["box = SurroundingRectangle"]),
@@ -62,6 +62,8 @@ def test_real_frames_are_flagged(body, expected):
     "frame = SurroundingRectangle(Dot()).set_stroke(opacity=0.4)",
     "self.add(m.DashedVMobject(m.RoundedRectangle(width=4, height=2)))",
     "a = ScreenRectangle(height=3)\nb = a\nself.add(DashedVMobject(b))",
+    "s = Circle()\ns = Square()\nself.add(DashedVMobject(s))",
+    "b = Rectangle()\nself.add(DashedVMobject(b.copy().scale(1.2)))",
 ])
 def test_frame_variants_are_flagged(body):
     assert not check_frames(_scene(body)).passed
@@ -81,7 +83,9 @@ def test_chained_surrounding_rectangle_names_its_variable():
     "card = RoundedRectangle(width=4.7, height=2.7, fill_color=BLACK, fill_opacity=0.9)\nself.add(card)",
     "self.add(BackgroundRectangle(Dot()))",
     "x = Rectangle(width=2, height=1)\nself.add(x)",
-    "frame = Rectangle()\nframe = Circle()\nself.add(DashedVMobject(Circle()))",
+    # A name means the value it was last assigned above the read.
+    "frame = Rectangle()\nframe = Circle()\nself.add(DashedVMobject(frame))",
+    "b = Circle()\nself.add(DashedVMobject(b.copy()))",
 ])
 def test_clean_scenes_pass(body):
     result = check_frames(_scene(body))
@@ -90,6 +94,21 @@ def test_clean_scenes_pass(body):
 
 def test_self_referential_names_do_not_loop():
     assert check_frames(_scene("a = b\nb = a\nself.add(DashedVMobject(a))")).passed
+
+
+def test_long_alias_chains_resolve_in_linear_time():
+    # Two bindings per name used to branch at every step (2**40 paths here).
+    lines = ["a0 = Square()", "a0 = Circle()"]
+    for i in range(1, 41):
+        lines += [f"a{i} = a{i - 1}", f"a{i} = a{i - 1}"]
+    lines.append("self.add(DashedVMobject(a40))")
+    assert check_frames(_scene("\n".join(lines))).passed
+
+
+def test_violations_are_in_line_order():
+    result = check_frames(_scene(FRAME_VIA_NAME + RECAP_BOX))
+    lines = [int(v.split(":")[0].removeprefix("line ")) for v in result.violations]
+    assert len(lines) == 3 and lines == sorted(lines)
 
 
 def test_unparseable_code_fails_open():
