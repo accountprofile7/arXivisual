@@ -21,6 +21,9 @@ POST /api/process  (api/routes.py: rate-limit + dedupe [api/throttle.py] + stale
 - **LLM**: Azure OpenAI GPT-5 family, provider-switchable via `agents/base.py` (Claude via the `anthropic` SDK is the second provider; Dedalus = legacy fallback).
 - **TTS**: Azure OpenAI `gpt-4o-mini-tts` as manim-voiceover `OpenAIService`; env routed to Azure's
   OpenAI-compatible endpoint at render time by `rendering/local_runner.py:_tts_subprocess_env`.
+  The render and dry-run children run LLM-generated code, so their env is an allowlist
+  (`subprocess_env.scrubbed_env`: OS, locale, proxy/CA, LaTeX/font vars); app secrets are not inherited,
+  only the derived `OPENAI_*` TTS key. Hygiene, not a sandbox: same uid, so `/proc` is still readable.
 - **Rendering**: local subprocess (`RENDER_MODE=local`, the default and what prod runs). Modal exists
   (`rendering/modal_runner.py`) only as an unused optional mode. **There is no Redis anywhere.**
 - **DB**: Postgres (asyncpg) when `DATABASE_URL` set, SQLite `./arxiviz.db` locally. No alembic — schema is

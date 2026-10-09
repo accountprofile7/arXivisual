@@ -55,15 +55,41 @@ class TestDryRunExecution:
         result = asyncio.run(tester.test_render(VALID_SCENE))
         assert result.success, f"{result.error_type}: {result.error_message}"
 
-    def test_generated_code_cannot_see_claude_credentials(self, tester, monkeypatch):
-        # construct() is LLM-generated, untrusted code; it must not see the key.
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "claude-secret")
+    @pytest.mark.parametrize("secret", [
+        "ANTHROPIC_API_KEY", "AZURE_OPENAI_API_KEY", "DATABASE_URL", "MODAL_TOKEN_SECRET",
+        "TURNSTILE_SECRET_KEY", "IP_HASH_SECRET", "POSTHOG_API_KEY", "AWS_SECRET_ACCESS_KEY",
+    ])
+    def test_generated_code_does_not_inherit_secrets(self, tester, monkeypatch, secret):
+        # construct() is LLM-generated, untrusted code; app secrets are not inherited.
+        monkeypatch.setenv(secret, "canary-secret")
         scene = VALID_SCENE.replace(
             "box = RoundedRectangle",
-            "import os; assert 'ANTHROPIC_API_KEY' not in os.environ\n        box = RoundedRectangle",
+            f"import os; assert {secret!r} not in os.environ\n        box = RoundedRectangle",
         )
         result = asyncio.run(tester.test_render(scene))
         assert result.success, f"{result.error_type}: {result.error_message}"
+
+    def test_driver_reaches_a_verdict_under_the_allowlist(self, tmp_path):
+        # The gate fails OPEN when the driver dies before printing a sentinel,
+        # so an allowlist that breaks `import manim` would pass silently through
+        # test_render. Run the driver directly and demand the OK sentinel.
+        import subprocess
+        import sys
+
+        from agents.dry_run_driver import SENTINEL_OK
+        from subprocess_env import scrubbed_env
+
+        scene = tmp_path / "scene.py"
+        scene.write_text(VALID_SCENE, encoding="utf-8")
+        env = scrubbed_env()
+        env["OPENAI_API_KEY"] = "dry-run-placeholder"
+        result = subprocess.run(
+            [sys.executable, str(rt_module._DRIVER_PATH), str(scene), "ValidScene"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=120, cwd=tmp_path, env=env, stdin=subprocess.DEVNULL,
+        )
+        assert result.returncode == 0, result.stderr[-2000:]
+        assert SENTINEL_OK in result.stdout, result.stderr[-2000:]
 
 
     def test_numpy_truth_value_bug_is_caught(self, tester):
