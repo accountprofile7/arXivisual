@@ -3,13 +3,14 @@ The plan contains scenes whose description starts with "VISUAL AID:". Each is a 
 
 ### Layout convention (Manim frame is about 14.2 wide x 8 tall)
 - CENTER STAGE: a box of 7.0 x 3.8 centered at `ORIGIN` (x in [-3.5, 3.5], y in [-1.9, 1.9]). The real mechanism diagram lives here for the whole video. It is never cleared: only add to it and highlight it (`Indicate`, `Circumscribe`, or `.animate.set_stroke(YELLOW, width=6)` then back). Keep every center-stage mobject inside that box.
-- FOUR CORNERS: boxes of 3.0 x 1.5 flush with the four corners of the base safe area x in [-6, 6], y in [-3.5, 3.5] (corner box centers at x = +/-4.5, y = +/-2.75; use `UL`, `UR`, `DL`, `DR` signs). Corner boxes therefore span |x| in [3.0, 6.0], |y| in [2.0, 3.5] and never overlap the center stage (y gap 0.1) or each other. TL, TR and BL host the 3 analogy moments in the plan's order; BR hosts the final recap.
-- Define the layout once as named constants and helpers at the top of `construct()` (`SAFE_X, SAFE_Y = 6.0, 3.5`, `CENTER_W, CENTER_H = 7.0, 3.8`, `CORNER_W, CORNER_H = 3.0, 1.5`, and a `corner_anchor(corner)` helper), then place everything through them so no magic coordinates drift.
-- A corner analogy pops in (`FadeIn(..., scale=0.5)` / `GrowFromCenter`), plays for 2-5 seconds, then shrinks to a small resting icon (about 0.8 x 0.5) in the same corner, which stays on screen as a legend. At the end the three resting icons gather into a tiny summary in the BR corner.
+- FOUR CORNERS (resting spots): boxes of 3.0 x 1.5 flush with the four corners of the base safe area x in [-6, 6], y in [-3.5, 3.5] (corner box centers at x = +/-4.5, y = +/-2.75; use `UL`, `UR`, `DL`, `DR` signs). They span |x| in [3.0, 6.0], |y| in [2.0, 3.5], so resting icons never overlap the center stage (y gap 0.1) or each other. TL, TR and BL host the 3 analogy moments in the plan's order; BR hosts the final recap.
+- ZOOM-UP INSETS: while an analogy plays it is shown large, in a 4.7 x 2.7 inset flush with the same corner (inset centers at x = +/-3.65, y = +/-2.15; insets span |x| in [1.3, 6.0], |y| in [0.8, 3.5]). An inset never covers another corner's resting spot, and insets of different corners never overlap. Only the ONE active inset may cover the edge of the center stage, and only while it plays: the center-stage part it highlights must sit outside that inset (for TL: right of x = -1.3 or below y = 0.8) so analogy and mechanism are both visible. A pinned title must be gone before the first inset grows.
+- Define the layout once as named constants and helpers at the top of `construct()` (`SAFE_X, SAFE_Y = 6.0, 3.5`, `CENTER_W, CENTER_H = 7.0, 3.8`, `CORNER_W, CORNER_H = 3.0, 1.5`, `INSET_W, INSET_H = 4.7, 2.7`, `ICON_W, ICON_H = 0.8, 0.5`, and the `corner_anchor(corner)`, `inset_anchor(corner)` and `icon_scale(mob)` helpers from the snippet below), then place everything through them so no magic coordinates drift.
+- A corner analogy GROWS, PLAYS, then SETTLES. Grow: build it at inset size around `inset_anchor(corner)` on an opaque dark card (`RoundedRectangle(width=INSET_W, height=INSET_H, corner_radius=0.2, stroke_width=0, fill_color=BLACK, fill_opacity=0.9)`), give the finished analogy `set_z_index(1)` so the card never covers it (a part added to it later needs its own `set_z_index(1)`), then grow card and analogy out of the corner together with `FadeIn(card, analogy, target_position=corner_anchor(corner), scale=0.35)`. Play: 2-5 seconds of motion inside the inset at full size. Settle: in ONE `self.play`, the grow in reverse, `FadeOut(card, *temporary_parts, target_position=corner_anchor(corner), scale=0.35)`, while the part that stays shrinks to a small resting icon (about 0.8 x 0.5) with `part.animate.scale(icon_scale(part)).move_to(corner_anchor(corner))`; the icon stays on screen as a legend. `FadeIn` only parts not yet on screen; `FadeOut` or shrink only parts already on screen. At the end the three resting icons gather into a tiny summary in the BR corner.
 - While a corner analogy plays, the matching center-stage element pulses or glows in the SAME `self.play(...)` or the same voiceover block, so analogy and mechanism are on screen together.
 
 ### Where this block overrides the base spatial rules (narrated VISUAL_NARRATION videos only)
-- The base "end every beat with FadeOut" rule is REPLACED: never FadeOut or clear the center stage between beats. Only a corner analogy's temporary parts leave when it shrinks to its resting icon.
+- The base "end every beat with FadeOut" rule is REPLACED: never FadeOut or clear the center stage between beats. Only a corner analogy's card and temporary parts leave when it settles to its resting icon.
 - `buff` is at least 0.3 everywhere (`next_to`, `arrange`, tag placement); the 0.15/0.2 minimums do not apply.
 - The "~7 labeled elements on screen" limit counts TAGS only (labeled elements). Unlabeled shapes (dots, grid cells, slabs, arrows) are exempt, but group them into `VGroup(...).arrange(..., buff=0.3)` rather than positioning each independently.
 - Everything else in the base rules (safe area, LaTeX, no overlap, labels away from arrows) still applies.
@@ -40,32 +41,51 @@ Keep every spatial, safe-area and LaTeX rule above. The non-"VISUAL AID:" scenes
 - Tag contrast: every `Text` / `MathTex` tag uses a high-contrast color (`WHITE` or a bright palette color such as `YELLOW`, `TEAL`, `ORANGE`). Never use `GREY`, any `DARK_*` color, or opacity below 0.8 for text. Use `font_size` of at least 28 for `Text` at 480p, and place each tag with `next_to(shape, DOWN, buff=0.3)` (buff of 0.3 or more) so it never touches a shape.
 - Final composition: the finished center-stage diagram fills a reasonable part of its box (about 60-100% of 7.0 x 3.8) and stays centered; the four corner icons sit at the edges. Never shrink the whole detailed diagram into a tiny cluster.
 - Repeated or stacked blocks ("this block repeats N times"): draw a few simplified block icons at legible size (for example 3 `RoundedRectangle` icons plus a "..." tag) instead of scaling the full detailed diagram down.
-- Do NOT `FadeOut` the center stage between scenes (that would break the build-up); only a corner analogy's temporary parts are removed when it shrinks to its resting icon.
+- Do NOT `FadeOut` the center stage between scenes (that would break the build-up); only a corner analogy's card and temporary parts are removed when it settles to its resting icon.
 - Labels follow their shape: when a shape is replaced or transformed (for example the 256 slab becoming the 64 slab), `Transform` / `ReplacementTransform` its label too (or `FadeOut` the old label in the same play). Never `Write` / `FadeIn` a second label at the spot where one already sits, so a tag is never drawn twice on top of itself.
-- Tags never touch lines: a tag sits OUTSIDE every shape with at least 0.3 clearance, and never on or across a line.
-- No frames (a static check enforces this): never draw a frame, boundary, outline or placeholder box around anything, in the center or in a corner. Group parts by spacing and color instead. Never construct a `SurroundingRectangle`, and never a `DashedVMobject` of a `Rectangle`, `Square`, `RoundedRectangle` or `ScreenRectangle`. Highlight only with `Circumscribe`, `Indicate` or `.animate.set_stroke(...)`. The diagram starts with the real input shape, not an outline of where it will go. If the plan asks for an outline, frame, dashed box or placeholder, leave it out.
+- Tags never touch lines: a tag sits OUTSIDE every shape with at least 0.3 clearance, and never on or across a line (an inset's card is a background, so a tag may sit on it).
+- No frames (a static check enforces this): never draw a frame, boundary, outline or placeholder box around anything, in the center or in a corner. The one panel allowed is an inset's filled card with `stroke_width=0`. Group parts by spacing and color instead. Never construct a `SurroundingRectangle`, and never a `DashedVMobject` of a `Rectangle`, `Square`, `RoundedRectangle` or `ScreenRectangle`. Highlight only with `Circumscribe`, `Indicate` or `.animate.set_stroke(...)`. The diagram starts with the real input shape, not an outline of where it will go. If the plan asks for an outline, frame, dashed box or placeholder, leave it out.
 - The final recap lives ONLY in the BR corner. In the last beat nothing new is added over the center stage except highlights (`Indicate`, `Circumscribe`, `set_stroke`): no row of stacked block icons across the top, nothing over arcs or arrows already drawn.
 
-### Few-shot snippet: corner helper + phrase-paced voiceover pair (inside `construct`)
+### Few-shot snippet: layout helpers + one corner analogy that grows, plays and settles (inside `construct`)
 ```python
 SAFE_X, SAFE_Y = 6.0, 3.5
 CENTER_W, CENTER_H = 7.0, 3.8
 CORNER_W, CORNER_H = 3.0, 1.5
+INSET_W, INSET_H = 4.7, 2.7
+ICON_W, ICON_H = 0.8, 0.5
 
 def corner_anchor(corner):
-    # Center of a corner box flush with the safe area; corner is UL, UR, DL or DR
+    # Resting spot: center of a corner box flush with the safe area; corner is UL, UR, DL or DR
     x = (SAFE_X - CORNER_W / 2) * corner[0]
     y = (SAFE_Y - CORNER_H / 2) * corner[1]
     return np.array([x, y, 0])
 
+def inset_anchor(corner):
+    # Center of the zoomed-up inset, flush with the same corner
+    x = (SAFE_X - INSET_W / 2) * corner[0]
+    y = (SAFE_Y - INSET_H / 2) * corner[1]
+    return np.array([x, y, 0])
+
+def icon_scale(mob):
+    # Shrinks mob to fit the resting icon; max() guards a zero width or height
+    return min(ICON_W / max(mob.width, 0.01), ICON_H / max(mob.height, 0.01))
+
 slab = Rectangle(width=2.4, height=1.6, color=BLUE, fill_opacity=0.6).move_to(ORIGIN)
-dots = VGroup(*[Dot(radius=0.125, color=YELLOW) for _ in range(12)]).arrange_in_grid(3, 4, buff=0.12)
-dots.move_to(corner_anchor(UL))
-icon = RoundedRectangle(width=0.8, height=0.5, color=YELLOW).move_to(corner_anchor(UL))
+card = RoundedRectangle(width=INSET_W, height=INSET_H, corner_radius=0.2, stroke_width=0,
+                        fill_color=BLACK, fill_opacity=0.9).move_to(inset_anchor(UL))
+funnel = Polygon([-1.0, 0.8, 0], [1.0, 0.8, 0], [0.25, -0.8, 0], [-0.25, -0.8, 0], color=YELLOW)
+dots = VGroup(*[Dot(radius=0.125, color=YELLOW) for _ in range(12)]).arrange_in_grid(3, 4, buff=0.25)
+analogy = VGroup(dots, funnel).arrange(RIGHT, buff=0.4).move_to(inset_anchor(UL))
+analogy.set_z_index(1)  # above the card, even while the card fades out on top of it
 self.play(FadeIn(slab))
-with self.voiceover(text="A wide stream enters the funnel.") as tracker:
-    self.play(FadeIn(dots, scale=0.5), Indicate(slab, color=YELLOW), run_time=tracker.duration)
-with self.voiceover(text="It squeezes down to a quarter.") as tracker:
-    self.play(ReplacementTransform(dots, icon),
+with self.voiceover(text="A wide stream reaches the funnel.") as tracker:
+    self.play(FadeIn(card, analogy, target_position=corner_anchor(UL), scale=0.35),
+              Indicate(slab, color=YELLOW), run_time=tracker.duration)
+with self.voiceover(text="Every dot squeezes through the neck.") as tracker:
+    self.play(dots.animate.scale(0.4).move_to(funnel), run_time=tracker.duration)
+with self.voiceover(text="The thick slab slims to a quarter.") as tracker:
+    self.play(FadeOut(card, dots, target_position=corner_anchor(UL), scale=0.35),
+              funnel.animate.scale(icon_scale(funnel)).move_to(corner_anchor(UL)),
               slab.animate.stretch_to_fit_width(0.6), run_time=tracker.duration)
 ```

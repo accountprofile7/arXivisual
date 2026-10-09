@@ -253,13 +253,18 @@ def _snippet():
     return re.search(r"```python\n(.*?)```", block, re.S).group(1)
 
 
-def test_snippet_layout_constants_inside_safe_area_and_non_overlapping():
+def _snippet_constants() -> dict:
     import re
 
     ns: dict = {}
     for line in _snippet().splitlines():
         if re.fullmatch(r"[A-Z_]+(, [A-Z_]+)* = [\d.]+(, [\d.]+)*", line):
             exec(line, ns)  # numeric constant lines from our own prompt
+    return ns
+
+
+def test_snippet_layout_constants_inside_safe_area_and_non_overlapping():
+    ns = _snippet_constants()
     safe_x, safe_y = ns["SAFE_X"], ns["SAFE_Y"]
     assert (safe_x, safe_y) == (6.0, 3.5)  # base prompt / SpatialValidator safe area
     cw, ch, w, h = ns["CORNER_W"], ns["CORNER_H"], ns["CENTER_W"], ns["CENTER_H"]
@@ -305,3 +310,89 @@ def test_prompts_ban_frames_when_on(monkeypatch):
     assert "No frames: never plan an outline, frame, dashed box, placeholder" in plan
     assert "The first scene draws the real input shape itself" in plan
     assert "Never list `SurroundingRectangle` or `DashedVMobject` in `elements`" in plan
+
+
+def _flush_box(sx, sy, w, h, safe_x, safe_y):
+    """(x0, x1, y0, y1) of a w x h box flush with the safe-area corner (sx, sy)."""
+    x = sorted((sx * safe_x, sx * (safe_x - w)))
+    y = sorted((sy * safe_y, sy * (safe_y - h)))
+    return (*x, *y)
+
+
+def _overlap(a, b):
+    return a[0] < b[1] and b[0] < a[1] and a[2] < b[3] and b[2] < a[3]
+
+
+def test_zoom_up_insets_fit_and_never_cover_other_corners():
+    ns = _snippet_constants()
+    safe = (ns["SAFE_X"], ns["SAFE_Y"])
+    iw, ih, cw, ch = ns["INSET_W"], ns["INSET_H"], ns["CORNER_W"], ns["CORNER_H"]
+    assert (iw, ih) == (4.7, 2.7)
+    assert iw > cw and ih > ch  # a zoom-up, not a same-size corner
+    assert ns["ICON_W"] <= cw and ns["ICON_H"] <= ch
+    corners = [(sx, sy) for sx in (-1, 1) for sy in (-1, 1)]
+    for c in corners:
+        inset = _flush_box(*c, iw, ih, *safe)
+        for other in corners:
+            if other == c:
+                continue
+            assert not _overlap(inset, _flush_box(*other, iw, ih, *safe))
+            assert not _overlap(inset, _flush_box(*other, cw, ch, *safe))
+
+
+def test_prompts_describe_the_zoom_up_inset_when_on(monkeypatch):
+    monkeypatch.setenv("VISUAL_NARRATION", "1")
+    gen = _narrated(_generator())
+    assert "ZOOM-UP INSETS" in gen
+    assert "4.7 x 2.7 inset flush with the same corner" in gen
+    assert "GROWS, PLAYS, then SETTLES" in gen
+    assert "FadeIn(card, analogy, target_position=corner_anchor(corner), scale=0.35)" in gen
+    assert "FadeOut(card, *temporary_parts, target_position=corner_anchor(corner), scale=0.35)" in gen
+    assert "the center-stage part it highlights must sit outside that inset" in gen
+    assert "The one panel allowed is an inset's filled card with `stroke_width=0`" in gen
+    assert "A pinned title must be gone before the first inset grows" in gen
+    plan = _planner_prompt(_planner())
+    assert "grows out of its corner into a large inset (about 4.7 x 2.7 units)" in plan
+    assert "Only the active inset may cover the edge of the center stage" in plan
+    assert "an inset's filled dark card is a background, not a frame" in plan
+
+
+# Assertions spliced into the snippet: they run inside construct() under the dry run.
+_AUTHORED_CHECKS = """\
+assert np.allclose(card.get_corner(UL), [-SAFE_X, SAFE_Y, 0])
+assert card.get_left()[0] <= analogy.get_left()[0] and analogy.get_right()[0] <= card.get_right()[0]
+assert card.get_bottom()[1] <= analogy.get_bottom()[1] and analogy.get_top()[1] <= card.get_top()[1]
+assert slab.get_left()[0] >= card.get_right()[0] or slab.get_top()[1] <= card.get_bottom()[1]
+assert min(m.z_index for m in analogy.get_family()) > card.z_index
+"""
+_SETTLED_CHECKS = """\
+on_screen = self.get_mobject_family_members()
+assert card not in on_screen and dots not in on_screen
+assert funnel in on_screen and slab in on_screen
+assert np.allclose(funnel.get_center(), corner_anchor(UL))
+assert funnel.width <= ICON_W + 1e-6 and funnel.height <= ICON_H + 1e-6
+"""
+
+
+def _snippet_scene(after: str) -> str:
+    head, tail = _snippet().split("self.play(FadeIn(slab))\n", 1)
+    body = head + _AUTHORED_CHECKS + "self.play(FadeIn(slab))\n" + tail + after
+    return (
+        "from manim import *\nfrom manim_voiceover import VoiceoverScene\n"
+        "from manim_voiceover.services.openai import OpenAIService\n\n"
+        "class Demo(VoiceoverScene):\n    def construct(self):\n"
+        '        self.set_speech_service(OpenAIService(voice="nova", transcription_model=None))\n'
+        + "\n".join("        " + ln for ln in body.splitlines()) + "\n"
+    )
+
+
+def test_snippet_grows_plays_and_settles_under_manim(monkeypatch):
+    from agents.render_tester import RenderTester
+
+    monkeypatch.setenv("RENDER_TEST_EXECUTE", "1")
+    tester = RenderTester(timeout_seconds=120)
+    result = asyncio.run(tester.test_render(_snippet_scene(_SETTLED_CHECKS)))
+    assert result.success, f"{result.error_type}: {result.error_message}"
+    # Control: the spliced assertions really run (the gate fails open on harness faults).
+    broken = asyncio.run(tester.test_render(_snippet_scene("assert card in self.get_mobject_family_members()\n")))
+    assert not broken.success and "AssertionError" in broken.error_message
