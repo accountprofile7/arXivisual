@@ -96,7 +96,7 @@ ENABLE_VISUAL_AIDS                # env: "1"/"true" enables silent visual aids (
 VISUAL_AIDS_PER_SECTION           # env: default 3
 MAX_VISUAL_AIDS                   # env: default 15 per paper
 VISUAL_AID_RENDER_QUALITY         # env: "low" (default) | "medium" | "high"
-VISUAL_NARRATION                  # env: "1"/"true" makes narrated videos DRAW 3 named quantities (default off; planner + generator prompt blocks; recommended)
+VISUAL_NARRATION                  # env: "1"/"true" makes narrated videos DRAW the mechanism, one job per corner: TL whole-concept preview + recap, BL few-phrase analogy, TR per-phrase pictogram, BR empty (default off; planner + generator prompt blocks; recommended)
 ```
 
 ## LLM Provider Layer (`agents/base.py`)

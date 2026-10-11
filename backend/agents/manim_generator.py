@@ -439,8 +439,8 @@ class ManimGenerator(BaseAgent):
 - If voiceover is enabled, keep tracker-timed play calls with run_time=tracker.duration"""
             if voiceover_enabled and visual_narration_enabled():
                 expectations += (
-                    '\n- Keep every "VISUAL AID:" scene DRAWN as proportional geometry inside the '
-                    "voiceover block that names it; text only as a short tag after the shape exists"
+                    '\n- Keep every "VISUAL AID:" scene DRAWN as a shapes-only corner analogy inside the '
+                    "voiceover blocks that name it; tags belong to the center stage only"
                 )
 
         error_feedback = f"""
