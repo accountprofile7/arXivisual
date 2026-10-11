@@ -8,6 +8,7 @@ Automatically switches to PostgreSQL when DATABASE_URL environment variable is s
 import logging
 import os
 
+from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from .models import Base
@@ -58,6 +59,33 @@ async def get_db():
             await session.close()
 
 
+# Columns added after the first release. There is no alembic and create_all never
+# alters an existing table, so init_db adds any that are missing: (table, column,
+# DDL type). Types must be valid on both SQLite and Postgres. New columns must be
+# nullable (or carry a DEFAULT) so existing rows stay valid.
+_ADDED_COLUMNS: list[tuple[str, str, str]] = [
+    ("visualizations", "kind", "VARCHAR"),
+    ("visualizations", "anchor_paragraph", "INTEGER"),
+]
+
+
+def _add_missing_columns(sync_conn) -> None:
+    """Idempotently ALTER TABLE ... ADD COLUMN for each missing _ADDED_COLUMNS entry."""
+    insp = inspect(sync_conn)
+    # Several replicas (API + worker) run init_db concurrently on Postgres; IF NOT
+    # EXISTS makes a lost race a no-op instead of a startup crash. SQLite lacks it.
+    if_not_exists = "IF NOT EXISTS " if sync_conn.dialect.name == "postgresql" else ""
+    existing: dict[str, set[str]] = {}
+    for table, column, ddl_type in _ADDED_COLUMNS:
+        if table not in existing:
+            existing[table] = {c["name"] for c in insp.get_columns(table)}
+        if column not in existing[table]:
+            sync_conn.execute(
+                text(f"ALTER TABLE {table} ADD COLUMN {if_not_exists}{column} {ddl_type}")
+            )
+            existing[table].add(column)
+
+
 async def init_db():
     """
     Initialize database tables.
@@ -66,6 +94,7 @@ async def init_db():
     """
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_add_missing_columns)
     # Idempotent data hygiene, run at every API start (one cheap scan of the
     # visualizations table): hide pre-fix truncated-id video rows where a
     # full-id row exists (see queries.supersede_legacy_truncated_rows).

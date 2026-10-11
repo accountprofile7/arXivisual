@@ -55,11 +55,25 @@ Generates a complete Python file: a `VoiceoverScene` subclass whose narration is
 Each generated scene must pass four gates in sequence. Any failure aborts the attempt, and feedback from **all** failed gates is concatenated and fed to `ManimGenerator.run_with_feedback()` along with the previous code. Stale gate results are cleared between attempts so retries never chase issues that no longer exist. Budget: `MAX_RETRIES` (3) + `VOICE_QUALITY_RETRIES` (2) = 5 attempts.
 
 - **CodeValidator** (`code_validator.py`) — pure static analysis: AST parse, `from manim import *` injection, Scene-class and `construct()` checks, auto-fixes for common typos and unclosed brackets, and detection of LaTeX split across `MathTex` arguments (which crashes Manim and always forces regeneration).
+- **TextBudget** (`text_budget.py`) — optional static gate, only with `VISUAL_NARRATION=1` on narrated (not silent-aid) profiles, right after CodeValidator: AST-counts on-screen text (no Paragraph/BulletedList/Title, each Text <=3 words, <=15 tag words per video, math/numbers count 1) and sends the offending strings back through the retry loop. No LLM.
+- **FrameCheck** (`frame_check.py`) — runs right after TextBudget under the same conditions and soft-gate contract: flags any `SurroundingRectangle` and any `DashedVMobject` of a rectangle-family shape (narrated videos draw no frames, outlines or placeholder boxes) and sends the offending lines back. No LLM.
 - **SpatialValidator** (`spatial_validator.py`) — regex-extracts positions from `move_to`/`shift`/`next_to`/`to_edge` calls, flags elements outside screen bounds (|x| > 7, |y| > 4) or the safe area, likely overlaps, and `next_to`/`arrange` calls missing `buff`. Static analysis only, so positioning it can't parse (pure `next_to` chains) goes unchecked.
 - **VoiceoverScriptValidator** (`voiceover_script_validator.py`) — hard checks (`VoiceoverScene`, `set_speech_service`, at least one voiceover block, tracker-timed plays), then narration quality: a 6–40 word window per line, rejection of animation-command phrasing ("Now we display…"), and alignment (≥ 0.45) and educational (≥ 0.50) scores from heuristics, overridden by an LLM judge when available. The judge is synchronous, so the pipeline runs it in `asyncio.to_thread` to avoid stalling concurrent visualizations.
 - **RenderTester** (`render_tester.py`) — the only gate that executes the code: `compile()` for syntax in-process, then **full `construct()` execution in a dry-run subprocess** (`dry_run_driver.py`): manim's `dry_run` config processes every animation without writing frames, TTS is replaced by an embedded silent MP3 (manim-voiceover has no dry-run support and would otherwise call the real service), `add_sound` is a no-op (drops the ffmpeg dependency), and subcaptions are disabled (under dry_run `config.output_file` is an empty string, so their writer raises at finish()). ~0.2s per scene, no network, no spend. This catches the runtime class import testing structurally can't — a production render died on `if a.get_center() == b.get_center():` (numpy truth-value `ValueError`) that only fires when `construct()` runs. Verdicts come from stdout sentinels; a driver crash without a verdict fails OPEN (the real render still guards, and a gate must never block all videos on its own infrastructure). `RENDER_TEST_EXECUTE=0` falls back to legacy import-only validation; `RENDER_TEST_TIMEOUT_SECONDS` (120) bounds it; a timeout fails open (CPU starvation under load is not a code verdict — 1,405 valid scenes were rejected in one week before this).
 
 If all 5 attempts fail, `VOICE_FAIL_BEHAVIOR` (default `return_silent`) keeps the last generated code as a pending, videoless visualization; `drop_viz` and `hard_error` are the alternatives.
+
+### Visual aids (silent loops, `ENABLE_VISUAL_AIDS=1`)
+
+A second, optional kind of visualization: short (5–10 s) **silent looping** clips shown inline right after the paragraph they illustrate, in addition to the narrated videos. Off by default; with the flag off nothing below runs and narrated behavior is unchanged.
+
+- **VisualAidAnalyzer** (`visual_aid_analyzer.py`) — one JSON-mode call per section. It sees the section's *display* paragraphs, numbered (`display_paragraphs` = `split_paragraphs(normalize_display_text(summary or content))`, the exact text the reader shows), and returns up to `VISUAL_AIDS_PER_SECTION` (3) aids, each with a `paragraph_index` anchor and 2–4 storyboard beats. Concepts already covered by narrated videos are skipped. LLM text fields are length-capped.
+- **No planner.** `build_aid_plan` turns the beats into a short `VisualAidPlan`, saving one LLM call per aid.
+- **`GenerationProfile`** (`pipeline.py`) — `NARRATED` reproduces the narrated settings exactly; `VISUAL_AID` is silent (plain `Scene`, or `ThreeDScene` for `three_d`), 5–10 s, 3 attempts, gate names prefixed `aid:` (ignored by `evals/metrics.py`), and a failed aid is **dropped**, never shown. The generator uses `prompts/manim_generator_silent.md` and the `examples/silent_loop.py` few-shot; narrated prompts are byte-identical to before (snapshot tests).
+- **Caps:** `VISUAL_AIDS_PER_SECTION` (3) and `MAX_VISUAL_AIDS` (15 per paper). Aids render through the same render path; `VISUAL_AID_RENDER_QUALITY` (default `low`) sets their quality.
+- **Storage:** `visualizations.kind` (`"visual_aid"`; `NULL`/`"narrated"` = narrated) and `anchor_paragraph`. On the legacy path aid ids are `viz_{id}_{101+j}`; on Temporal they take the next free index.
+- **Jobs:** aids never fail a job. Terminal status and finalize use narrated results only; progress counts every render. On Temporal, aid generation runs concurrently with the narrated renders behind `workflow.patched("visual-aids")`, and the repair round is narrated-only.
+- **Paragraph contract:** `ingestion/text_normalize.py:split_paragraphs` and `frontend/lib/paragraphs.ts` must agree (blank-line split, never inside `$$` or code fences, plain fallback if a block is left open). `frontend/scripts/check-paragraphs.mjs` checks the TypeScript twin against the same cases as `tests/test_split_paragraphs.py`.
 
 ### Pipeline Configuration
 
@@ -78,15 +92,26 @@ VOICE_FAIL_BEHAVIOR = "return_silent"
 RENDER_MODE                       # env: "local" | "modal"; "modal" also skips RenderTester
 VOICEOVER_TTS_SERVICE             # env: "openai" (default) | "gtts"
 VOICEOVER_VOICE_NAME              # env: default "nova"
+ENABLE_VISUAL_AIDS                # env: "1"/"true" enables silent visual aids (default off)
+VISUAL_AIDS_PER_SECTION           # env: default 3
+MAX_VISUAL_AIDS                   # env: default 15 per paper
+VISUAL_AID_RENDER_QUALITY         # env: "low" (default) | "medium" | "high"
+VISUAL_NARRATION                  # env: "1"/"true" makes narrated videos DRAW 3 named quantities (default off; planner + generator prompt blocks; recommended)
 ```
 
 ## LLM Provider Layer (`agents/base.py`)
+
+**Claude caching:** the Manim generator's system prompt goes out as two blocks, a stable cached reference and an uncached per-plan live-docs suffix (`system_suffix`), and the pipeline pre-warms the cache once (`prewarm_system_cache`, `max_tokens=0`) before concurrent generation. Without the split, every concept had a unique prefix: one ResNet run wrote 180k cache tokens and read only 20k.
 
 Every agent call routes through `call_llm` / `call_llm_sync`, which resolve a provider from the environment: **Azure OpenAI is the primary** (set `AZURE_OPENAI_API_KEY` + `AZURE_OPENAI_ENDPOINT`, or force with `LLM_PROVIDER=azure`). Details that matter:
 
 - Calls go through Azure's OpenAI-compatible v1 endpoint (`{endpoint}/openai/v1/`) using the standard `openai` SDK, against the deployment named by `AZURE_OPENAI_DEPLOYMENT`.
 - GPT-5 reasoning tokens count against `max_completion_tokens`, so each request adds 4096 tokens of headroom above the agent's visible-answer budget; `AZURE_OPENAI_REASONING_EFFORT` (default `low`) trades depth for speed and cost.
 - Prompt templates are formatted with `str.replace`, not `str.format` — paper text is full of LaTeX braces.
+
+**Claude (Anthropic)** is the second provider (`ANTHROPIC_API_KEY`, or force with `LLM_PROVIDER=anthropic`); auto-detect order is Azure, then Anthropic, then Dedalus. It uses the official `anthropic` SDK on the beta messages surface with streaming (no HTTP timeouts on long generations), the `server-side-fallback-2026-07-01` beta with `fallbacks="default"`, an ephemeral `cache_control` on the system prompt (the 17KB Manim reference), adaptive thinking (not sent; `max_tokens` gets 8000 tokens of headroom), `ANTHROPIC_EFFORT` (default `medium`) and `ANTHROPIC_MODEL` (default `claude-sonnet-5-5`). JSON mode is prompt-only (plus the shared repair and retry). Visual QA's vision path stays Azure-only.
+
+**Claude CLI (`LLM_PROVIDER=claude_cli`)** is an opt-in, local-only provider for experiments: each call shells out to `claude -p` (Claude Code headless, `--output-format json`) so usage is billed to the developer's Claude subscription instead of the API. It is never auto-detected, and `get_provider()` refuses it when `ENVIRONMENT=production`, when Azure is fully configured, or when the `claude` executable is not on PATH. Security model: the model gets no tools (`--tools ""`), no MCP servers (`--strict-mcp-config`), no session persistence, `--safe-mode` (no CLAUDE.md, hooks, plugins or skills) and project-only setting sources run from a fresh empty temp directory, so neither user nor project settings reach it; `--bare` is not used because it disables the subscription (OAuth) login. The child environment is an allowlist of `os.environ` (PATH, home/profile dirs, proxy and CA vars, `CLAUDE_CODE_*`/`CLAUDE_CONFIG_DIR`); everything else (`ANTHROPIC_*`, `AZURE_*`, `DATABASE_URL`, `S3_*`, App Insights, AWS, ...) is dropped, since an API key there would silently switch billing to the API. Built-in tools are also denied by name (`--disallowedTools`), the real `claude.exe` is preferred over the npm `.cmd` shim, and a timeout kills the whole process tree. The CLI has no system-prompt-file flag and Windows caps command lines near 32k characters, so the prompt (with the system prompt in a `<system_instructions>` block) travels on stdin. At most `CLAUDE_CLI_CONCURRENCY` (default 2) processes run at once; each is killed after `CLAUDE_CLI_TIMEOUT_SECONDS` (default 600). `max_tokens` is not enforced by the CLI. Terms note: personal, local use of your own subscription only; do not use it to serve other users or in a deployed service, and check Anthropic's current terms for automated use of subscriptions.
 
 A Dedalus Labs provider remains selectable as a legacy fallback (`DEDALUS_API_KEY`). Historical footnote: `agents/dedalus_base.py` (multi-model handoff chains) and `agents/voiceover_generator.py` (a post-hoc voiceover transform, superseded by unified generation and disabled by default) are legacy code from that era, slated for removal.
 
@@ -117,7 +142,7 @@ self.set_speech_service(OpenAIService(voice="nova", model="gpt-4o-mini-tts", tra
 |--------|----------|---------|
 | POST | `/api/process` | Start processing a paper; returns a job ID |
 | GET | `/api/status/{job_id}` | Poll job progress |
-| GET | `/api/paper/{arxiv_id}` | Processed paper: sections (each with `videos` = every `complete` visualization, newest first; `video_url` = `videos[0]` for older clients) + visualizations; superseded rows excluded; 404 for stale (pre-fix abstract-only) papers so the reader offers re-processing |
+| GET | `/api/paper/{arxiv_id}` | Processed paper: sections (each with `videos` = every `complete` visualization, newest first; `video_url` = `videos[0]` for older clients) + visualizations; `visual_aids` = complete silent aids in paragraph order, each with `paragraph_index`, never mixed into `videos`; superseded rows excluded; 404 for stale (pre-fix abstract-only) papers so the reader offers re-processing |
 | GET | `/api/papers` | Explore gallery: all processed papers |
 | GET | `/api/video/{video_id}` | Serve or redirect to a rendered video |
 | POST | `/api/render` | Dev-only raw Manim render — in production, 404 unless `RENDER_API_SECRET` is configured and presented via `X-Render-Secret` (timing-safe compare) |
@@ -128,7 +153,7 @@ CORS allows `arxivisual.org`, `www.arxivisual.org`, localhost dev, and whatever 
 
 ## Persistence (`backend/db/`)
 
-SQLAlchemy async ORM, four tables keyed off the arXiv ID: `papers`, `sections` (content, summary, equations/figures/tables as JSON), `visualizations` (concept, storyboard, Manim code, video URL, status), and `processing_jobs`. `DATABASE_URL` selects Postgres (asyncpg, used in production); unset falls back to local SQLite (aiosqlite).
+SQLAlchemy async ORM, four tables keyed off the arXiv ID: `papers`, `sections` (content, summary, equations/figures/tables as JSON), `visualizations` (concept, storyboard, Manim code, video URL, status, `kind`, `anchor_paragraph`), and `processing_jobs`. `DATABASE_URL` selects Postgres (asyncpg, used in production); unset falls back to local SQLite (aiosqlite). There is no alembic: `init_db` runs `create_all` and then `_add_missing_columns` (`db/connection.py`), which idempotently adds the nullable columns listed in `_ADDED_COLUMNS` (`IF NOT EXISTS` on Postgres, so concurrent replica startups are safe).
 
 ## Observability (Langfuse)
 

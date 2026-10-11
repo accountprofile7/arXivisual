@@ -2,7 +2,7 @@
 
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class VisualizationType(str, Enum):
@@ -36,6 +36,23 @@ class VisualizationCandidate(BaseModel):
     context: str = Field(..., description="Relevant text from section")
 
 
+class VisualAidCandidate(BaseModel):
+    """A short silent looping visual aid anchored to a paragraph."""
+
+    section_id: str = Field(..., description="ID of the section containing this concept")
+    concept_name: str = Field(..., description="Name of the concept being illustrated")
+    concept_description: str = Field(..., description="What the aid should show")
+    visualization_type: VisualizationType = Field(..., description="Type of visualization needed")
+    paragraph_index: int = Field(..., ge=0, description="Index of the paragraph the aid is anchored to")
+    beats: list[str] = Field(default_factory=list, description="2-4 short storyboard beats")
+    context: str = Field("", description="Relevant text from the paragraph")
+
+    @field_validator("beats")
+    @classmethod
+    def _clamp_beats(cls, v: list[str]) -> list[str]:
+        return v[:4]
+
+
 class AnalyzerOutput(BaseModel):
     """Output from the Section Analyzer agent."""
     
@@ -63,6 +80,16 @@ class VisualizationPlan(BaseModel):
     duration_seconds: int = Field(..., ge=15, le=60, description="Target video length")
     scenes: list[Scene] = Field(default_factory=list, description="Ordered list of scenes")
     narration_points: list[str] = Field(default_factory=list, description="Key points to convey")
+
+
+class VisualAidPlan(VisualizationPlan):
+    """Minimal storyboard for a short silent visual aid.
+
+    A separate subclass so VisualizationPlan's 15s minimum (narrated videos)
+    stays exactly as it was; only aids may be this short.
+    """
+
+    duration_seconds: int = Field(..., ge=3, le=15, description="Target loop length")
 
 
 class GeneratedCode(BaseModel):
@@ -96,3 +123,5 @@ class Visualization(BaseModel):
     manim_code: str = Field(..., description="Complete, validated Python code")
     video_url: str | None = Field(None, description="URL after rendering (filled by Team 3)")
     status: VisualizationStatus = Field(VisualizationStatus.PENDING, description="Current status")
+    kind: str = Field("narrated", description="'narrated' or 'visual_aid' (silent looping clip)")
+    anchor_paragraph: int | None = Field(None, description="Paragraph index a visual aid is anchored to")

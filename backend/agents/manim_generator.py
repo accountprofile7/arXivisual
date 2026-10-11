@@ -22,10 +22,22 @@ try:
     )
     from .base import BaseAgent
     from .context7_docs import get_manim_docs
+    from .visual_narration import (
+        GENERATOR_ANCHOR,
+        insert_block,
+        load_block,
+        visual_narration_enabled,
+    )
 except ImportError:
     sys.path.insert(0, str(Path(__file__).parent.parent))
     from agents.base import BaseAgent
     from agents.context7_docs import get_manim_docs
+    from agents.visual_narration import (
+        GENERATOR_ANCHOR,
+        insert_block,
+        load_block,
+        visual_narration_enabled,
+    )
     from models.generation import (
         GeneratedCode,
         VisualizationPlan,
@@ -63,6 +75,9 @@ class ManimGenerator(BaseAgent):
         VisualizationType.THREE_D: "voiceover_architecture.py",
     }
 
+    # Few-shot example for silent looping aids (short, no title card, loops).
+    SILENT_EXAMPLE = "silent_loop.py"
+
     DEFAULT_EXAMPLE = "equation_walkthrough.py"
     DEFAULT_VOICEOVER_EXAMPLE = "voiceover_equation.py"
 
@@ -84,6 +99,11 @@ class ManimGenerator(BaseAgent):
 
     def __init__(self, model: str | None = None):
         super().__init__("manim_generator.md", model=model, max_tokens=8192)
+        # Dedicated template for short silent looping visual aids; the narrated
+        # template above is never touched by silent mode.
+        self.silent_prompt_template = self._load_prompt("manim_generator_silent.md")
+        silent_example = self._get_examples_dir() / self.SILENT_EXAMPLE
+        self.silent_example = silent_example.read_text() if silent_example.exists() else ""
         self.examples = self._load_examples(self.EXAMPLE_FILES, self.DEFAULT_EXAMPLE)
         self.voiceover_examples = self._load_examples(
             self.VOICEOVER_EXAMPLE_FILES,
@@ -199,33 +219,80 @@ class ManimGenerator(BaseAgent):
         voice_name: str,
         narration_style: str,
         target_duration_seconds: tuple[int, int],
+        silent_loop: bool = False,
     ) -> str:
         """Build generation prompt with mode-specific requirements."""
+        if silent_loop:
+            return self._build_silent_prompt(plan, target_duration_seconds)
         example_code = self._get_example_for_type(plan.visualization_type, voiceover_enabled)
         scene_class_name = self._generate_scene_class_name(plan.concept_name)
         tts_setup_snippet = self._get_tts_setup_snippet(tts_service, voice_name)
         tts_import = self._get_tts_import(tts_service)
 
-        return self._format_prompt(
-            plan_json=plan.model_dump_json(indent=2),
-            example_code=example_code,
-            duration_seconds=plan.duration_seconds,
-            target_min_duration=target_duration_seconds[0],
-            target_max_duration=target_duration_seconds[1],
-            scene_class_name=scene_class_name,
-            voiceover_enabled=str(voiceover_enabled).lower(),
-            tts_service=tts_service,
-            voice_name=voice_name,
-            narration_style=narration_style,
-            tts_setup_snippet=tts_setup_snippet,
-            tts_import=tts_import,
-        )
+        # VISUAL_NARRATION=1: narrated prompts gain the "Show, don't label" block.
+        # Same swap-and-restore as the silent prompt (no await in between).
+        narrated_template = self.prompt_template
+        if voiceover_enabled and visual_narration_enabled():
+            self.prompt_template = insert_block(
+                narrated_template, GENERATOR_ANCHOR, load_block("visual_narration_generator.md")
+            )
+        try:
+            return self._format_prompt(
+                plan_json=plan.model_dump_json(indent=2),
+                example_code=example_code,
+                duration_seconds=plan.duration_seconds,
+                target_min_duration=target_duration_seconds[0],
+                target_max_duration=target_duration_seconds[1],
+                scene_class_name=scene_class_name,
+                voiceover_enabled=str(voiceover_enabled).lower(),
+                tts_service=tts_service,
+                voice_name=voice_name,
+                narration_style=narration_style,
+                tts_setup_snippet=tts_setup_snippet,
+                tts_import=tts_import,
+            )
+        finally:
+            self.prompt_template = narrated_template
 
-    async def _enrich_system_prompt_with_live_docs(
+    def _build_silent_prompt(
+        self,
+        plan: VisualizationPlan,
+        target_duration_seconds: tuple[int, int],
+    ) -> str:
+        """Prompt for a short silent looping visual aid (no audio concepts at all)."""
+        narrated_template = self.prompt_template
+        # _format_prompt reads self.prompt_template; no await between swap and
+        # restore, so this cannot interleave with another task.
+        self.prompt_template = self.silent_prompt_template
+        try:
+            return self._format_prompt(
+                plan_json=plan.model_dump_json(indent=2, exclude={"narration_points"}),
+                example_code=self.silent_example,
+                duration_seconds=plan.duration_seconds,
+                target_min_duration=target_duration_seconds[0],
+                target_max_duration=target_duration_seconds[1],
+                scene_class_name=self._generate_scene_class_name(plan.concept_name),
+            )
+        finally:
+            self.prompt_template = narrated_template
+
+    @property
+    def stable_system_prompt(self) -> str:
+        """The cross-concept system prefix (the static Manim reference).
+
+        Byte-identical for every plan/type in a process: it is the block the
+        Anthropic prompt cache is keyed on, and what the pipeline pre-warms.
+        Anything per-plan belongs in ``_live_docs_suffix``."""
+        return self.system_prompt
+
+    async def _live_docs_suffix(
         self,
         plan: VisualizationPlan,
     ) -> str:
         """
+        Per-plan system suffix: live Manim docs ('' when unavailable). The
+        caller sends it AFTER the cached stable prompt (``system_suffix``).
+
         Fetch live Manim docs via Dedalus SDK + Context7 MCP as the PRIMARY
         documentation source, with static manim_reference.md as fallback only.
 
@@ -263,11 +330,10 @@ class ManimGenerator(BaseAgent):
                     "(Dedalus SDK + Context7 MCP)",
                     len(live_docs),
                 )
-                # Merge original system prompt with live docs
-                # Keep the base system prompt's instructions and add live docs as primary reference
+                # Appended to the stable system prompt (concatenated on Azure/Dedalus,
+                # a separate uncached block on Anthropic) as the primary reference
                 return (
-                    self.system_prompt
-                    + "\n\n"
+                    "\n\n"
                     + "=" * 80
                     + "\n"
                     + "# LIVE MANIM API REFERENCE (Context7 MCP + Dedalus SDK)\n"
@@ -281,9 +347,9 @@ class ManimGenerator(BaseAgent):
         except Exception as exc:
             logger.warning("  Live doc fetch failed (%s), falling back to static docs", exc)
 
-        # Fallback: static manim_reference.md (only used when live sources fail)
+        # Fallback: static manim_reference.md alone (only when live sources fail)
         logger.info("  Using static manim_reference.md as fallback")
-        return self.system_prompt
+        return ""
 
     async def run(
         self,
@@ -293,14 +359,17 @@ class ManimGenerator(BaseAgent):
         voice_name: str = "",
         narration_style: str = "concept_teacher",
         target_duration_seconds: tuple[int, int] = (30, 45),
+        silent_loop: bool = False,
     ) -> GeneratedCode:
         """Generate Manim code from a plan, optionally with built-in voiceovers.
+
+        ``silent_loop=True`` selects the silent looping visual-aid prompt.
 
         Uses the Dedalus SDK + Context7 MCP as the primary documentation source.
         Static docs are only used as a last-resort fallback.
         """
         # Fetch live Manim docs via Dedalus + Context7 before generating
-        enriched_system_prompt = await self._enrich_system_prompt_with_live_docs(plan)
+        system_suffix = await self._live_docs_suffix(plan)
 
         prompt = self._build_prompt(
             plan=plan,
@@ -309,9 +378,12 @@ class ManimGenerator(BaseAgent):
             voice_name=voice_name,
             narration_style=narration_style,
             target_duration_seconds=target_duration_seconds,
+            silent_loop=silent_loop,
         )
 
-        text = await self._call_llm(prompt, system_prompt=enriched_system_prompt)
+        text = await self._call_llm(
+            prompt, system_prompt=self.stable_system_prompt, system_suffix=system_suffix
+        )
 
         code = self._clean_code(text)
         actual_class_name = self._extract_scene_class_name(code)
@@ -338,13 +410,14 @@ class ManimGenerator(BaseAgent):
         voice_name: str = "",
         narration_style: str = "concept_teacher",
         target_duration_seconds: tuple[int, int] = (30, 45),
+        silent_loop: bool = False,
     ) -> GeneratedCode:
         """Regenerate code with feedback from previous failures.
 
         Also uses Dedalus SDK + Context7 MCP for live documentation.
         """
         # Fetch live docs for the feedback loop too
-        enriched_system_prompt = await self._enrich_system_prompt_with_live_docs(plan)
+        system_suffix = await self._live_docs_suffix(plan)
 
         base_prompt = self._build_prompt(
             plan=plan,
@@ -353,7 +426,22 @@ class ManimGenerator(BaseAgent):
             voice_name=voice_name,
             narration_style=narration_style,
             target_duration_seconds=target_duration_seconds,
+            silent_loop=silent_loop,
         )
+
+        if silent_loop:
+            expectations = """- Preserve concept accuracy and scene progression from the plan
+- Keep the clip silent, short, and within the target duration
+- Keep on-screen text minimal and make the last frame match the first so it loops"""
+        else:
+            expectations = """- Preserve concept accuracy and scene progression from the plan
+- Keep strict narration quality (educational, concept-focused)
+- If voiceover is enabled, keep tracker-timed play calls with run_time=tracker.duration"""
+            if voiceover_enabled and visual_narration_enabled():
+                expectations += (
+                    '\n- Keep every "VISUAL AID:" scene DRAWN as proportional geometry inside the '
+                    "voiceover block that names it; text only as a short tag after the shape exists"
+                )
 
         error_feedback = f"""
 ## Previous Attempt Failed!
@@ -368,14 +456,14 @@ The previous code had issues. Fix them and regenerate complete code.
 {error_message}
 
 ### Mandatory Fix Expectations:
-- Preserve concept accuracy and scene progression from the plan
-- Keep strict narration quality (educational, concept-focused)
-- If voiceover is enabled, keep tracker-timed play calls with run_time=tracker.duration
+{expectations}
 """
 
         prompt = base_prompt + "\n\n" + error_feedback
 
-        text = await self._call_llm(prompt, system_prompt=enriched_system_prompt)
+        text = await self._call_llm(
+            prompt, system_prompt=self.stable_system_prompt, system_suffix=system_suffix
+        )
 
         code = self._clean_code(text)
         actual_class_name = self._extract_scene_class_name(code)

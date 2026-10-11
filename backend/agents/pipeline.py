@@ -12,8 +12,10 @@ import os
 import re
 import sys
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 try:
     from langfuse import observe
@@ -28,37 +30,53 @@ try:
     from ..models.generation import (
         GeneratedCode,
         ValidatorOutput,
+        VisualAidCandidate,
+        VisualAidPlan,
         Visualization,
         VisualizationCandidate,
         VisualizationStatus,
     )
-    from ..models.paper import StructuredPaper
+    from ..models.generation import Scene as PlanScene
+    from ..models.paper import Section, StructuredPaper
     from ..models.spatial import SpatialValidatorOutput
     from ..models.voiceover import VoiceoverValidationOutput
+    from .base import prewarm_system_cache
     from .code_validator import CodeValidator
+    from .frame_check import FrameCheckResult, check_frames
     from .manim_generator import ManimGenerator
     from .render_tester import RenderTester, RenderTestOutput
     from .section_analyzer import SectionAnalyzer
     from .spatial_validator import SpatialValidator
+    from .text_budget import TextBudgetResult, check_text_budget
+    from .visual_aid_analyzer import VisualAidAnalyzer
+    from .visual_narration import visual_narration_enabled
     from .visualization_planner import VisualizationPlanner
     from .voiceover_script_validator import VoiceoverScriptValidator
 except ImportError:
     sys.path.insert(0, str(Path(__file__).parent.parent))
+    from agents.base import prewarm_system_cache
     from agents.code_validator import CodeValidator
+    from agents.frame_check import FrameCheckResult, check_frames
     from agents.manim_generator import ManimGenerator
     from agents.render_tester import RenderTester, RenderTestOutput
     from agents.section_analyzer import SectionAnalyzer
     from agents.spatial_validator import SpatialValidator
+    from agents.text_budget import TextBudgetResult, check_text_budget
+    from agents.visual_aid_analyzer import VisualAidAnalyzer
+    from agents.visual_narration import visual_narration_enabled
     from agents.visualization_planner import VisualizationPlanner
     from agents.voiceover_script_validator import VoiceoverScriptValidator
     from models.generation import (
         GeneratedCode,
         ValidatorOutput,
+        VisualAidCandidate,
+        VisualAidPlan,
         Visualization,
         VisualizationCandidate,
         VisualizationStatus,
     )
-    from models.paper import StructuredPaper
+    from models.generation import Scene as PlanScene
+    from models.paper import Section, StructuredPaper
     from models.spatial import SpatialValidatorOutput
     from models.voiceover import VoiceoverValidationOutput
 
@@ -94,10 +112,99 @@ VOICE_QUALITY_STRICT = True
 VOICE_QUALITY_RETRIES = 2
 VOICE_FAIL_BEHAVIOR = "return_silent"  # drop_viz | return_silent | hard_error
 
+
+
+def _env_flag(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in ("1", "true")
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, "").strip() or default)
+    except ValueError:
+        return default
+
+
+# Silent looping visual aids (default off). Generated alongside the narrated
+# videos by generate_visual_aids(); callers (jobs/, temporal_app/) gate on the flag.
+ENABLE_VISUAL_AIDS = _env_flag("ENABLE_VISUAL_AIDS")
+VISUAL_AIDS_PER_SECTION = _env_int("VISUAL_AIDS_PER_SECTION", 3)
+MAX_VISUAL_AIDS = _env_int("MAX_VISUAL_AIDS", 15)
+
 # Optional observation seam for the eval harness (backend/evals). When set, it
 # is called after every quality gate as metrics_hook(gate_name, attempt, passed).
 # None (the default) changes no behavior.
 metrics_hook: Callable[[str, int, bool], None] | None = None
+
+
+@dataclass(frozen=True)
+class GenerationProfile:
+    """Everything generate_single_visualization varies between narrated videos
+    and silent visual aids."""
+
+    voiceover: bool
+    target_duration_seconds: tuple[int, int]
+    max_attempts: int
+    gate_prefix: str
+    fail_behavior: Literal["return_silent", "drop", "hard_error"]
+    kind: str
+    silent_loop: bool = False  # use the silent looping-aid generator prompt
+
+
+def narrated_profile() -> GenerationProfile:
+    """Today's narrated behavior, read from the module constants at call time
+    (callers and tests adjust ENABLE_VOICEOVER etc. at runtime)."""
+    return GenerationProfile(
+        voiceover=ENABLE_VOICEOVER,
+        target_duration_seconds=VOICEOVER_TARGET_DURATION_SECONDS,
+        max_attempts=MAX_RETRIES + (VOICE_QUALITY_RETRIES if ENABLE_VOICEOVER else 0),
+        gate_prefix="",
+        fail_behavior=VOICE_FAIL_BEHAVIOR,
+        kind="narrated",
+    )
+
+
+NARRATED = narrated_profile()
+VISUAL_AID = GenerationProfile(
+    voiceover=False,
+    target_duration_seconds=(5, 10),
+    max_attempts=3,
+    gate_prefix="aid:",
+    fail_behavior="drop",
+    kind="visual_aid",
+    silent_loop=True,
+)
+
+
+def build_aid_plan(candidate: VisualAidCandidate) -> VisualAidPlan:
+    """Minimal storyboard for an aid: one scene per beat, 5-10s total.
+
+    Replaces the planner LLM call; VisualAidPlan keeps the narrated
+    VisualizationPlan's 15s minimum untouched.
+    """
+    low, high = VISUAL_AID.target_duration_seconds
+    beats = [b for b in candidate.beats if b.strip()] or [
+        candidate.concept_description or candidate.concept_name
+    ]
+    total = min(high, max(low, 2 * len(beats) + 2))  # 2 beats -> 6s ... 4 beats -> 10s
+    per_scene = max(1, total // len(beats))
+    scenes = [
+        PlanScene(
+            order=i,
+            description=beat,
+            duration_seconds=per_scene,
+            transitions="Smooth Create / FadeIn; fade or reverse back to the opening composition at the end",
+            elements=[],
+        )
+        for i, beat in enumerate(beats, start=1)
+    ]
+    return VisualAidPlan(
+        concept_name=candidate.concept_name,
+        visualization_type=candidate.visualization_type,
+        duration_seconds=total,
+        scenes=scenes,
+        narration_points=[],
+    )
 
 
 def _report_gate(gate: str, attempt: int, passed: bool) -> None:
@@ -199,6 +306,21 @@ async def _with_callback(
     return result
 
 
+async def _prewarm_generator_cache(generator: ManimGenerator, n_candidates: int) -> None:
+    """Warm the generators' shared system-prompt cache before a concurrent burst.
+
+    Concurrent first calls would each WRITE the ~10k-token Manim reference
+    (cache entries only exist once a response begins); one warm-up request makes
+    them all READ it. With a single candidate its own call warms the cache.
+    Best-effort: prewarm_system_cache never raises and is a no-op off Anthropic.
+    """
+    if n_candidates < 2:
+        return
+    await prewarm_system_cache(
+        getattr(generator, "stable_system_prompt", ""), getattr(generator, "model", None)
+    )
+
+
 @observe(name="generate-visualizations", capture_input=False)
 async def generate_visualizations(
     paper: StructuredPaper,
@@ -268,6 +390,7 @@ async def generate_visualizations(
     logger.info("STEP 2-7: Planning, generating, and quality validation")
 
     if CONCURRENT_GENERATION:
+        await _prewarm_generator_cache(generator, len(candidates))
         tasks = [
             _with_callback(
                 generate_single_visualization(
@@ -316,28 +439,32 @@ async def generate_visualizations(
     return visualizations
 
 
+_SKIP_SECTION_TITLES = {
+    "references",
+    "bibliography",
+    "acknowledgments",
+    "acknowledgements",
+    "appendix",
+    "supplementary",
+    "related work",
+}
+
+
+def _sections_to_analyze(paper: StructuredPaper) -> list[Section]:
+    return [
+        section
+        for section in paper.sections
+        if section.title.lower() not in _SKIP_SECTION_TITLES and len(section.content) > 100
+    ]
+
+
 async def _analyze_all_sections(
     analyzer: SectionAnalyzer,
     paper: StructuredPaper,
 ) -> list[VisualizationCandidate]:
     """Analyze all paper sections to find visualization candidates."""
     candidates: list[VisualizationCandidate] = []
-
-    skip_titles = {
-        "references",
-        "bibliography",
-        "acknowledgments",
-        "acknowledgements",
-        "appendix",
-        "supplementary",
-        "related work",
-    }
-
-    sections_to_analyze = [
-        section
-        for section in paper.sections
-        if section.title.lower() not in skip_titles and len(section.content) > 100
-    ]
+    sections_to_analyze = _sections_to_analyze(paper)
 
     if CONCURRENT_ANALYSIS:
         tasks = [
@@ -373,34 +500,47 @@ async def _analyze_all_sections(
 
 @observe(name="generate-single-visualization", capture_input=False)
 async def generate_single_visualization(
-    candidate: VisualizationCandidate,
+    candidate: VisualizationCandidate | VisualAidCandidate,
     paper: StructuredPaper,
-    planner: VisualizationPlanner,
+    planner: VisualizationPlanner | None,
     generator: ManimGenerator,
     validator: CodeValidator,
     spatial_validator: SpatialValidator | None = None,
     voiceover_script_validator: VoiceoverScriptValidator | None = None,
     render_tester: RenderTester | None = None,
+    profile: GenerationProfile | None = None,
 ) -> Visualization | None:
-    """Generate one visualization with strict quality gates."""
+    """Generate one visualization with strict quality gates.
+
+    ``profile`` selects narrated (default; today's behavior) or silent visual-aid
+    generation. A VisualAidCandidate skips the planner (its beats become the plan).
+    """
+    if profile is None:
+        profile = narrated_profile()
+    is_aid = isinstance(candidate, VisualAidCandidate)
+    anchor_paragraph = candidate.paragraph_index if is_aid else None
     viz_id = f"viz_{uuid.uuid4().hex[:8]}"
     logger.info("")
     logger.info("%s", "─" * 50)
     logger.info("Generating: %s", candidate.concept_name)
     logger.info("  ID: %s", viz_id)
     logger.info("  Type: %s", candidate.visualization_type)
-    logger.info("  Priority: %s/5", candidate.priority)
+    if not is_aid:
+        logger.info("  Priority: %s/5", candidate.priority)
 
     try:
-        section = paper.get_section_by_id(candidate.section_id)
-        section_content = section.content if section else ""
+        if is_aid:
+            plan = build_aid_plan(candidate)
+        else:
+            section = paper.get_section_by_id(candidate.section_id)
+            section_content = section.content if section else ""
 
-        logger.info("  Creating visualization plan (storyboard)...")
-        plan = await planner.run(
-            candidate=candidate,
-            full_section_content=section_content,
-            paper_context=paper.get_context(),
-        )
+            logger.info("  Creating visualization plan (storyboard)...")
+            plan = await planner.run(
+                candidate=candidate,
+                full_section_content=section_content,
+                paper_context=paper.get_context(),
+            )
         logger.info("  Plan ready: %s scenes, %ss target", len(plan.scenes), plan.duration_seconds)
 
         code_result: GeneratedCode | None = None
@@ -408,9 +548,14 @@ async def generate_single_visualization(
         spatial_result: SpatialValidatorOutput | None = None
         voice_result: VoiceoverValidationOutput | None = None
         render_result: RenderTestOutput | None = None
+        budget_result: TextBudgetResult | None = None
+        frame_result: FrameCheckResult | None = None
 
-        voiceover_enabled_for_generation = ENABLE_VOICEOVER
-        max_attempts = MAX_RETRIES + (VOICE_QUALITY_RETRIES if voiceover_enabled_for_generation else 0)
+        voiceover_enabled_for_generation = profile.voiceover
+        max_attempts = profile.max_attempts
+        gate_prefix = profile.gate_prefix
+        # Only silent aids pass silent_loop; narrated calls keep today's exact kwargs.
+        extra_gen_kwargs = {"silent_loop": True} if profile.silent_loop else {}
 
         for attempt in range(max_attempts):
             logger.info("  Attempt %s/%s...", attempt + 1, max_attempts)
@@ -423,7 +568,8 @@ async def generate_single_visualization(
                     tts_service=VOICEOVER_TTS_SERVICE,
                     voice_name=VOICEOVER_VOICE_NAME,
                     narration_style=VOICEOVER_NARRATION_STYLE,
-                    target_duration_seconds=VOICEOVER_TARGET_DURATION_SECONDS,
+                    target_duration_seconds=profile.target_duration_seconds,
+                    **extra_gen_kwargs,
                 )
             else:
                 if validation and validation.issues_found:
@@ -434,6 +580,10 @@ async def generate_single_visualization(
                     feedback_parts.append(voice_result.get_feedback_message())
                 if render_result and not render_result.success:
                     feedback_parts.append(render_result.get_feedback_message())
+                if budget_result and not budget_result.passed:
+                    feedback_parts.append(budget_result.get_feedback_message())
+                if frame_result and not frame_result.passed:
+                    feedback_parts.append(frame_result.get_feedback_message())
 
                 combined_feedback = "\n\n".join(feedback_parts) if feedback_parts else "Unknown issue; regenerate with cleaner structure and narration alignment."
                 code_result = await generator.run_with_feedback(
@@ -444,7 +594,8 @@ async def generate_single_visualization(
                     tts_service=VOICEOVER_TTS_SERVICE,
                     voice_name=VOICEOVER_VOICE_NAME,
                     narration_style=VOICEOVER_NARRATION_STYLE,
-                    target_duration_seconds=VOICEOVER_TARGET_DURATION_SECONDS,
+                    target_duration_seconds=profile.target_duration_seconds,
+                    **extra_gen_kwargs,
                 )
 
             # Clear the previous attempt's gate results now that this attempt's
@@ -456,11 +607,13 @@ async def generate_single_visualization(
             spatial_result = None
             voice_result = None
             render_result = None
+            budget_result = None
+            frame_result = None
 
             # Stage 1: code validation
             logger.info("    [1/4] CodeValidator: Checking syntax & structure...")
             validation = validator.validate(code_result.code)
-            _report_gate("code_validator", attempt, validation.is_valid and not validation.needs_regeneration)
+            _report_gate(f"{gate_prefix}code_validator", attempt, validation.is_valid and not validation.needs_regeneration)
             if validation.needs_regeneration or not validation.is_valid:
                 logger.warning(
                     "    [1/4] FAILED: %s issues - regenerating",
@@ -473,11 +626,31 @@ async def generate_single_visualization(
             else:
                 logger.info("    [1/4] PASSED")
 
+            # Static text budget and frame check (VISUAL_NARRATION narrated videos only; no LLM).
+            if visual_narration_enabled() and voiceover_enabled_for_generation and not profile.silent_loop:
+                budget_result = check_text_budget(current_code)
+                _report_gate(f"{gate_prefix}text_budget", attempt, budget_result.passed)
+                # Not a hard stop: downstream gates still run, so budget alone can
+                # never ship render-untested code. It forces a retry only if attempts remain.
+                if not budget_result.passed:
+                    logger.warning(
+                        "    TextBudget FAILED: %s violations",
+                        len(budget_result.violations),
+                    )
+                # Same soft-gate contract as the text budget.
+                frame_result = check_frames(current_code)
+                _report_gate(f"{gate_prefix}frame_check", attempt, frame_result.passed)
+                if not frame_result.passed:
+                    logger.warning(
+                        "    FrameCheck FAILED: %s",
+                        "; ".join(frame_result.violations),
+                    )
+
             # Stage 2: spatial validation
             if spatial_validator:
                 logger.info("    [2/4] SpatialValidator: Checking positioning...")
                 spatial_result = spatial_validator.validate(current_code)
-                _report_gate("spatial_validator", attempt, not spatial_result.needs_regeneration)
+                _report_gate(f"{gate_prefix}spatial_validator", attempt, not spatial_result.needs_regeneration)
                 if spatial_result.needs_regeneration:
                     logger.warning(
                         "    [2/4] FAILED: bounds=%s overlaps=%s - regenerating",
@@ -509,13 +682,14 @@ async def generate_single_visualization(
                     plan=plan,
                     candidate=candidate,
                 )
-                _report_gate("voiceover_script_validator", attempt, not voice_result.needs_regeneration)
+                _report_gate(f"{gate_prefix}voiceover_script_validator", attempt, not voice_result.needs_regeneration)
 
                 if voice_result.needs_regeneration:
                     logger.warning(
-                        "    [3/4] FAILED: alignment=%.2f educational=%.2f",
+                        "    [3/4] FAILED: alignment=%.2f educational=%.2f issues=%s",
                         voice_result.score_alignment,
                         voice_result.score_educational,
+                        "; ".join(voice_result.issues_found) or "none",
                     )
                     continue
 
@@ -531,7 +705,7 @@ async def generate_single_visualization(
             if render_tester:
                 logger.info("    [4/4] RenderTester: Testing import & execution...")
                 render_result = await render_tester.test_render(current_code)
-                _report_gate("render_tester", attempt, render_result.success)
+                _report_gate(f"{gate_prefix}render_tester", attempt, render_result.success)
                 if not render_result.success:
                     logger.warning(
                         "    [4/4] FAILED: %s - %s",
@@ -543,14 +717,22 @@ async def generate_single_visualization(
             else:
                 logger.info("    [4/4] RenderTester: Skipped")
 
+            soft_failed = [
+                name for name, r in (("text budget", budget_result), ("frame check", frame_result))
+                if r and not r.passed
+            ]
+            if soft_failed and attempt < max_attempts - 1:
+                logger.warning("    Other gates passed but %s failed - regenerating", " and ".join(soft_failed))
+                continue
+
             code_result.code = current_code
             logger.info("  ✓ All validations passed on attempt %s", attempt + 1)
             break
         else:
             logger.error("  ✗ FAILED after %s attempts", max_attempts)
-            if VOICE_FAIL_BEHAVIOR == "hard_error":
+            if profile.fail_behavior == "hard_error":
                 raise RuntimeError(f"Strict quality checks failed for {candidate.concept_name}")
-            if VOICE_FAIL_BEHAVIOR == "return_silent":
+            if profile.fail_behavior == "return_silent":
                 logger.warning("  Returning silent visualization based on fallback policy.")
                 if code_result:
                     return Visualization(
@@ -561,6 +743,8 @@ async def generate_single_visualization(
                         manim_code=code_result.code,
                         video_url=None,
                         status=VisualizationStatus.PENDING,
+                        kind=profile.kind,
+                        anchor_paragraph=anchor_paragraph,
                     )
             # drop_viz default
             return None
@@ -575,11 +759,97 @@ async def generate_single_visualization(
             manim_code=final_code,
             video_url=None,
             status=VisualizationStatus.PENDING,
+            kind=profile.kind,
+            anchor_paragraph=anchor_paragraph,
         )
 
     except Exception as exc:
         logger.error("Failed to generate visualization %s: %s", viz_id, exc)
         return None
+
+
+@observe(name="generate-visual-aids", capture_input=False)
+async def generate_visual_aids(
+    paper: StructuredPaper,
+    *,
+    skip_concepts: Iterable[str] = (),
+    max_per_section: int = VISUAL_AIDS_PER_SECTION,
+    max_total: int = MAX_VISUAL_AIDS,
+    on_visualization: VisualizationCallback | None = None,
+) -> list[Visualization]:
+    """Generate short silent looping visual aids anchored to paragraphs.
+
+    One analyzer call per eligible section (same filter as the narrated
+    analysis), capped per section and overall in section order. Failed aids are
+    dropped. ``on_visualization`` has the same checkpoint semantics as
+    generate_visualizations (CheckpointError on callback failure).
+    """
+    skip = tuple(skip_concepts)
+    logger.info("Starting visual aid generation for paper: %s", paper.meta.title)
+
+    analyzer = VisualAidAnalyzer()
+    generator = ManimGenerator()
+    validator = CodeValidator()
+    spatial_validator = SpatialValidator() if ENABLE_SPATIAL_VALIDATION else None
+    render_tester = RenderTester() if ENABLE_RENDER_TESTING else None
+
+    sections = _sections_to_analyze(paper)
+    results = await asyncio.gather(
+        *(
+            analyzer.run(
+                paper_title=paper.meta.title,
+                paper_abstract=paper.meta.abstract,
+                section=section,
+                max_aids=max_per_section,
+                skip_concepts=skip,
+            )
+            for section in sections
+        ),
+        return_exceptions=True,
+    )
+
+    candidates: list[VisualAidCandidate] = []
+    for section, result in zip(sections, results, strict=True):
+        if isinstance(result, Exception):
+            logger.error("Visual aid analysis failed for section %s: %s", section.id, result)
+            continue
+        candidates.extend(result[:max_per_section])
+    candidates = candidates[:max_total]
+    if not candidates:
+        return []
+
+    await _prewarm_generator_cache(generator, len(candidates))
+    outcomes = await asyncio.gather(
+        *(
+            _with_callback(
+                generate_single_visualization(
+                    candidate=candidate,
+                    paper=paper,
+                    planner=None,
+                    generator=generator,
+                    validator=validator,
+                    spatial_validator=spatial_validator,
+                    voiceover_script_validator=None,
+                    render_tester=render_tester,
+                    profile=VISUAL_AID,
+                ),
+                on_visualization,
+            )
+            for candidate in candidates
+        ),
+        return_exceptions=True,
+    )
+    aids: list[Visualization] = []
+    for outcome in outcomes:
+        if isinstance(outcome, CheckpointError):
+            raise outcome
+        if isinstance(outcome, Exception):
+            logger.error("Visual aid generation failed: %s", outcome)
+        elif outcome is not None:
+            aids.append(outcome)
+
+    logger.info("Successfully generated %s visual aids", len(aids))
+    return aids
 
 
 def generate_visualizations_sync(

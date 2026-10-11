@@ -68,6 +68,8 @@ class Visualization(Base):
     status = Column(String, default="pending")  # pending, rendering, complete, failed
     error = Column(Text, nullable=True)  # Error message if failed
     created_at = Column(DateTime, default=datetime.utcnow)
+    kind = Column(String, nullable=True)  # "narrated" | "visual_aid"; NULL (old rows) = narrated
+    anchor_paragraph = Column(Integer, nullable=True)  # paragraph index a visual aid is anchored to
 
     # Relationships
     paper = relationship("Paper", back_populates="visualizations")

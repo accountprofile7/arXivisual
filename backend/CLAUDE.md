@@ -18,9 +18,14 @@ POST /api/process  (api/routes.py: rate-limit + dedupe [api/throttle.py] + stale
   Postgres via async SQLAlchemy (db/) ← frontend polls GET /api/status/{job_id}
 ```
 
-- **LLM**: Azure OpenAI GPT-5 family, provider-switchable via `agents/base.py` (Dedalus = legacy fallback).
+- **LLM**: Azure OpenAI GPT-5 family, provider-switchable via `agents/base.py` (Claude via the `anthropic` SDK is the second provider; Dedalus = legacy fallback).
 - **TTS**: Azure OpenAI `gpt-4o-mini-tts` as manim-voiceover `OpenAIService`; env routed to Azure's
   OpenAI-compatible endpoint at render time by `rendering/local_runner.py:_tts_subprocess_env`.
+  The render and dry-run children run LLM-generated code, so their env is an allowlist
+  (`subprocess_env.scrubbed_env`: OS, locale, proxy/CA, LaTeX/font vars); app secrets are not inherited,
+  only the derived `OPENAI_*` TTS key. Hygiene, not a sandbox: same uid, so `/proc` is still readable.
+  A var the child genuinely needs (e.g. `TEXINPUTS`, `TZ`) must be added to `_ALLOW`. manim-voiceover's
+  OpenAI service runs `load_dotenv` from the render tmpdir upward, so never point `TMPDIR` under a dir holding a `.env`.
 - **Rendering**: local subprocess (`RENDER_MODE=local`, the default and what prod runs). Modal exists
   (`rendering/modal_runner.py`) only as an unused optional mode. **There is no Redis anywhere.**
 - **DB**: Postgres (asyncpg) when `DATABASE_URL` set, SQLite `./arxiviz.db` locally. No alembic — schema is
@@ -43,6 +48,7 @@ POST /api/process  (api/routes.py: rate-limit + dedupe [api/throttle.py] + stale
 | 5 | SpatialValidator | `agents/spatial_validator.py` | gate: bounds/overlap regex, no LLM |
 | 6 | VoiceoverScriptValidator | `agents/voiceover_script_validator.py` | gate: narration quality, heuristics + LLM judge |
 | 7 | RenderTester | `agents/render_tester.py` | gate: dry-run construct() execution in a stubbed subprocess (auto-skipped when `RENDER_MODE=modal`) |
+| + | VisualAidAnalyzer | `agents/visual_aid_analyzer.py` | LLM, only with `ENABLE_VISUAL_AIDS=1`: ≤3 silent looping aids per section, each anchored to a display paragraph; then generator + gates 4,5,7 under the `VISUAL_AID` profile (no planner, no voice gate) |
 
 SectionAnalyzer and VisualizationPlanner run in JSON mode on Azure (`response_format=json_object`; the
 Dedalus fallback can only be prompted) with a short analyst persona (`prompts/system/json_analyst.md`, not
@@ -86,7 +92,9 @@ npm/pip audit (advisory). `evals.yml` — nightly 06:00 UTC golden-set evals, fa
 
 ## Env vars (\* = secret; template: `.env.example`)
 
-- `AZURE_OPENAI_API_KEY`\*, `AZURE_OPENAI_ENDPOINT` — primary provider (auto-detected; `LLM_PROVIDER=azure|dedalus` forces).
+- `AZURE_OPENAI_API_KEY`\*, `AZURE_OPENAI_ENDPOINT` — primary provider (auto-detected; `LLM_PROVIDER=azure|anthropic|dedalus|claude_cli` forces; auto order azure, anthropic, dedalus).
+- `ANTHROPIC_API_KEY`\* — Claude provider, used when Azure is not configured. `ANTHROPIC_MODEL` (default `claude-sonnet-5-5`), `ANTHROPIC_EFFORT` (default `medium`).
+- `LLM_PROVIDER=claude_cli` — LOCAL ONLY, never auto-detected: each call runs `claude -p` on your Claude subscription (no API key, no API cost). Refused when `ENVIRONMENT=production`, when Azure is configured, or when `claude` is not on PATH. Uses `ANTHROPIC_MODEL`/`ANTHROPIC_EFFORT`; `CLAUDE_CLI_CONCURRENCY` (2), `CLAUDE_CLI_TIMEOUT_SECONDS` (600). The child env is an allowlist (PATH, home/profile dirs, proxy/CA vars, CLAUDE_CODE_*); every app secret is dropped. On timeout the whole process tree is killed (taskkill /T on Windows). Visual QA is skipped (Azure-only).
 - `AZURE_OPENAI_DEPLOYMENT` (default `gpt-5`), `AZURE_OPENAI_REASONING_EFFORT` (default `low`).
 - `DEDALUS_API_KEY`\* — legacy fallback provider (also powers optional Context7 docs via `agents/context7_docs.py`).
 - `DATABASE_URL`\* — Postgres; `postgres://` is auto-rewritten to `postgresql+asyncpg://`. Unset = SQLite.
@@ -126,6 +134,11 @@ npm/pip audit (advisory). `evals.yml` — nightly 06:00 UTC golden-set evals, fa
 ## Feature flags
 
 - `USE_TEMPORAL=1` — durable orchestration; any Temporal error falls back (fail-open) to the legacy in-process path.
+- `ENABLE_VISUAL_AIDS=1` — silent looping visual aids (`kind="visual_aid"`, `anchor_paragraph`) alongside narrated videos; caps
+  `VISUAL_AIDS_PER_SECTION` (3) / `MAX_VISUAL_AIDS` (15), `VISUAL_AID_RENDER_QUALITY` (`low`). Default off = narrated
+  behavior unchanged. Aids never fail a job, are excluded from repair, `videos`, and the gallery count. See ARCHITECTURE.md.
+- `VISUAL_NARRATION=1` — narrated videos use a center-stage mechanism built from phrase-sized beats plus exactly 3 corner analogy "visual aid moments" (TL/TR/BL; each grows into a 4.7x2.7 inset while it plays, then settles to a resting icon) and a BR recap: the narration names a quantity/structure and the screen draws it (proportional slabs, kernel grids, shortcut arrows) instead of writing it. Adds a static `text_budget` gate (`agents/text_budget.py`, no LLM; runs after CodeValidator on narrated profiles only: no Paragraph/BulletedList/Title, each Text <=3 words, <=15 tag words total; not a hard stop: downstream gates still run, and it forces a retry only while attempts remain; fails open; feedback joins the combined retry feedback). A static `frame_check` gate (`agents/frame_check.py`) follows it with the same soft-gate contract: it flags any `SurroundingRectangle` and any `DashedVMobject` of a rectangle-family shape (narrated videos draw no frames, outlines or placeholder boxes). With the flag on, the narration validator's minimum words per line relaxes from 6 to 4 (phrase pacing). Read at call time by the planner and the narrated generator (`agents/visual_narration.py`; blocks in `prompts/visual_narration_*.md`, also kept on retries). Default off = prompts byte-identical (snapshot tests). Silent aids unaffected. Dev tool: `tools/run_single_concept.py` (spends money). Recommended mode; the separate silent aids (`ENABLE_VISUAL_AIDS`) stay dormant.
+- **Claude prompt caching:** the generator sends its system prompt as two blocks, the stable Manim reference (cached, byte-identical across concepts) then the per-plan live docs (uncached, `system_suffix` in `agents/base.py`). Before concurrent generation the pipeline makes one `max_tokens=0` warm-up call (`prewarm_system_cache`, Anthropic only, best-effort) so parallel calls read the cache instead of each writing it. Azure/Dedalus get the two parts concatenated exactly as before.
 - `ENABLE_VISUAL_QA=1` — vision judge on rendered frames (observe-only on legacy path; verdict feeds repair on Temporal path).
 - `VISUAL_QA_REPAIR=1` — one **vision-grounded** repair round for `major` defects (Temporal path only): the
   rendered video is read back through the storage backend (never the CDN URL — stable keys cache for a year),
@@ -178,5 +191,7 @@ npm/pip audit (advisory). `evals.yml` — nightly 06:00 UTC golden-set evals, fa
    sections replaced, old viz rows unlinked from sections, then superseded by `finalize_job` once the new run has
    videos). Legacy truncated-id viz rows (`viz_17060376_1`) are superseded at API startup where a full-id complete
    row exists.
-10. **Keep `pytest` hermetic.** `testpaths=["tests"]` exists because scripts under `tools/` fire real API calls
+10. **Paragraph anchors have two owners that must agree:** `ingestion/text_normalize.py:split_paragraphs` and
+   `frontend/lib/paragraphs.ts`. Change both together and run `node frontend/scripts/check-paragraphs.mjs`.
+11. **Keep `pytest` hermetic.** `testpaths=["tests"]` exists because scripts under `tools/` fire real API calls
    on collection; new tests must not need network or real keys.

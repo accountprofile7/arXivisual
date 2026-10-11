@@ -33,15 +33,12 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from agents.dry_run_driver import SENTINEL_FAIL, SENTINEL_OK
+from subprocess_env import scrubbed_env
 
 logger = logging.getLogger(__name__)
 
 _DRIVER_PATH = Path(__file__).with_name("dry_run_driver.py")
 _TMPDIR_PREFIX = "dry-run-gate-"
-# The dry run needs no real credentials (TTS is stubbed, nothing uploads) and
-# it executes LLM-generated code — scrub secrets from the child environment.
-_SECRET_ENV_PREFIXES = ("AZURE_", "S3_", "LANGFUSE_", "DEDALUS_")
-_SECRET_ENV_KEYS = ("DATABASE_URL", "RENDER_API_SECRET", "OPENAI_API_KEY")
 
 
 class RenderTestOutput(BaseModel):
@@ -203,12 +200,13 @@ class RenderTester:
         with tempfile.TemporaryDirectory(prefix=_TMPDIR_PREFIX) as tmpdir:
             scene_path = Path(tmpdir) / "scene.py"
             scene_path.write_text(code, encoding="utf-8")
-            env = {
-                k: v for k, v in os.environ.items()
-                if not k.startswith(_SECRET_ENV_PREFIXES) and k not in _SECRET_ENV_KEYS
-            }
-            # The generated code instantiates OpenAIService before the driver
-            # swaps it out; its __init__ only needs a key to exist.
+            # The dry run needs no real credentials (TTS is stubbed, nothing
+            # uploads) and it executes LLM-generated code: allowlisted env only.
+            env = scrubbed_env()
+            # The driver stubs TTS, but if manim_voiceover's OpenAIService ever
+            # synthesized with no key set it would prompt to write one into a
+            # .env file (create_dotenv_openai); a placeholder rules that out.
+            # Nothing authenticates with it.
             env["OPENAI_API_KEY"] = "dry-run-placeholder"
             cmd = [sys.executable, str(_DRIVER_PATH), str(scene_path)]
             if scene_class:

@@ -38,6 +38,7 @@ from .schemas import (
     RenderResponse,
     SectionResponse,
     SectionVideo,
+    SectionVisualAid,
     StatusResponse,
     StepInfo,
     VisualizationResponse,
@@ -371,12 +372,22 @@ async def get_paper(arxiv_id: str, db: AsyncSession = Depends(get_db)):
         # relationship loads in heap order); pending/failed rows with a
         # leftover video_url were also mapped.
         section_videos: dict[str, list[SectionVideo]] = {}
+        section_aids: dict[str, list[SectionVisualAid]] = {}
         ordered = sorted(visible_viz, key=_viz_order, reverse=True)
         for v in ordered:
             if v.status == "complete" and v.video_url and v.section_id:
-                section_videos.setdefault(v.section_id, []).append(
-                    SectionVideo(viz_id=v.id, video_url=v.video_url, concept=v.concept or "")
-                )
+                if v.kind == "visual_aid":
+                    section_aids.setdefault(v.section_id, []).append(
+                        SectionVisualAid(viz_id=v.id, video_url=v.video_url, concept=v.concept or "",
+                                         paragraph_index=v.anchor_paragraph)
+                    )
+                else:
+                    section_videos.setdefault(v.section_id, []).append(
+                        SectionVideo(viz_id=v.id, video_url=v.video_url, concept=v.concept or "")
+                    )
+        # Reader order: by anchored paragraph (unanchored last), then newest first.
+        for aids in section_aids.values():
+            aids.sort(key=lambda a: (a.paragraph_index is None, a.paragraph_index or 0))
 
         return PaperResponse(
             paper_id=paper.id,
@@ -398,6 +409,7 @@ async def get_paper(arxiv_id: str, db: AsyncSession = Depends(get_db)):
                     equations=s.equations or [],
                     video_url=_first_video_url(section_videos.get(s.id)),
                     videos=section_videos.get(s.id, []),
+                    visual_aids=section_aids.get(s.id, []),
                 )
                 for s in sections
             ],
@@ -408,6 +420,7 @@ async def get_paper(arxiv_id: str, db: AsyncSession = Depends(get_db)):
                     concept=v.concept,
                     video_url=v.video_url,
                     status=VisualizationStatus(v.status),
+                    kind=v.kind or "narrated",
                 )
                 for v in visible_viz
             ],

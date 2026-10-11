@@ -8,6 +8,7 @@ construct() runs.
 """
 
 import asyncio
+import shutil
 
 import pytest
 
@@ -54,6 +55,40 @@ class TestDryRunExecution:
     def test_valid_voiceover_scene_passes(self, tester):
         result = asyncio.run(tester.test_render(VALID_SCENE))
         assert result.success, f"{result.error_type}: {result.error_message}"
+
+    @pytest.mark.parametrize("secret", [
+        "ANTHROPIC_API_KEY", "AZURE_OPENAI_API_KEY", "DATABASE_URL", "MODAL_TOKEN_SECRET",
+        "TURNSTILE_SECRET_KEY", "IP_HASH_SECRET", "POSTHOG_API_KEY", "AWS_SECRET_ACCESS_KEY",
+    ])
+    def test_generated_code_does_not_inherit_secrets(self, tester, monkeypatch, secret):
+        # construct() is LLM-generated, untrusted code; app secrets are not inherited.
+        monkeypatch.setenv(secret, "canary-secret")
+        scene = VALID_SCENE.replace(
+            "box = RoundedRectangle",
+            f"import os; assert {secret!r} not in os.environ\n        box = RoundedRectangle",
+        )
+        result = asyncio.run(tester.test_render(scene))
+        assert result.success, f"{result.error_type}: {result.error_message}"
+
+    # The gate fails OPEN when the driver dies before printing a sentinel, so an
+    # env that breaks `import manim` (or LaTeX, or fonts) would still "pass".
+    # A real verdict means no "produced no verdict" warning was logged.
+    def test_driver_reaches_a_verdict_under_the_allowlist(self, tester, caplog):
+        with caplog.at_level("WARNING", logger=rt_module.__name__):
+            result = asyncio.run(tester.test_render(VALID_SCENE))
+        assert result.success
+        assert "produced no verdict" not in caplog.text
+
+    @pytest.mark.skipif(not shutil.which("latex"), reason="needs a LaTeX install")
+    def test_latex_and_text_reach_a_verdict_under_the_allowlist(self, tester, caplog):
+        scene = VALID_SCENE.replace(
+            "box = RoundedRectangle(width=2, height=1)",
+            'box = VGroup(MathTex(r"\\frac{QK^T}{\\sqrt{d_k}}"), Text("256")).arrange(DOWN)',
+        )
+        with caplog.at_level("WARNING", logger=rt_module.__name__):
+            result = asyncio.run(tester.test_render(scene))
+        assert result.success, f"{result.error_type}: {result.error_message}"
+        assert "produced no verdict" not in caplog.text
 
     def test_numpy_truth_value_bug_is_caught(self, tester):
         result = asyncio.run(tester.test_render(NUMPY_BUG_SCENE))

@@ -14,7 +14,7 @@ def _utcnow_naive() -> datetime:
     must stay naive; this just replaces the deprecated _utcnow_naive()."""
     return datetime.now(UTC).replace(tzinfo=None)
 
-from sqlalchemy import delete, distinct, func, select, update
+from sqlalchemy import delete, distinct, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -313,7 +313,12 @@ async def list_paper_summaries(db: AsyncSession, active_job_max_age_hours: float
             Visualization.paper_id.label("paper_id"),
             func.count(distinct(Visualization.section_id)).label("n"),
         )
-        .where(Visualization.status == "complete", Visualization.video_url.isnot(None))
+        .where(
+            Visualization.status == "complete",
+            Visualization.video_url.isnot(None),
+            # Silent visual aids decorate a paper; they don't make it "ready".
+            or_(Visualization.kind.is_(None), Visualization.kind != "visual_aid"),
+        )
         .group_by(Visualization.paper_id)
         .subquery()
     )
@@ -426,6 +431,8 @@ async def create_visualization(
     video_url: str | None = None,
     storyboard: dict | None = None,
     manim_code: str | None = None,
+    kind: str | None = None,
+    anchor_paragraph: int | None = None,
 ) -> Visualization:
     """Create a new visualization."""
     viz = Visualization(
@@ -437,6 +444,8 @@ async def create_visualization(
         manim_code=manim_code,
         status=status,
         video_url=video_url,
+        kind=kind,
+        anchor_paragraph=anchor_paragraph,
     )
     db.add(viz)
     await db.commit()
@@ -486,6 +495,8 @@ async def insert_visualization_with_next_index(
     manim_code: str | None,
     session_maker,
     attempts: int = 5,
+    kind: str | None = None,
+    anchor_paragraph: int | None = None,
 ) -> str:
     """INSERT a checkpoint row under the first unused ``viz_{suffix}_{N}`` id.
 
@@ -504,6 +515,7 @@ async def insert_visualization_with_next_index(
                 await create_visualization(
                     db, viz_id=viz_id, paper_id=paper_id, section_id=section_id,
                     concept=concept, status="pending", storyboard=storyboard, manim_code=manim_code,
+                    kind=kind, anchor_paragraph=anchor_paragraph,
                 )
                 return viz_id
             except IntegrityError as exc:
@@ -590,8 +602,14 @@ async def upsert_visualization(
     video_url: str | None = None,
     storyboard: dict | None = None,
     manim_code: str | None = None,
+    kind: str | None = None,
+    anchor_paragraph: int | None = None,
 ) -> Visualization:
-    """Create or update a visualization."""
+    """Create or update a visualization.
+
+    ``kind``/``anchor_paragraph`` are only written when ``kind`` is given, so
+    callers that don't know about visual aids leave existing values alone.
+    """
     result = await db.execute(
         select(Visualization).where(Visualization.id == viz_id)
     )
@@ -613,6 +631,9 @@ async def upsert_visualization(
             viz.storyboard = storyboard
         if manim_code:
             viz.manim_code = manim_code
+        if kind is not None:
+            viz.kind = kind
+            viz.anchor_paragraph = anchor_paragraph
     else:
         # Create new visualization
         viz = Visualization(
@@ -624,6 +645,8 @@ async def upsert_visualization(
             manim_code=manim_code,
             status=status,
             video_url=video_url,
+            kind=kind,
+            anchor_paragraph=anchor_paragraph,
         )
         db.add(viz)
 

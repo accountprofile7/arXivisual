@@ -39,6 +39,9 @@ class RenderInput:
     # Set on repair re-renders so the activity doesn't recommend repairing the
     # repair (one round max, decided by the workflow).
     is_repair: bool = False
+    # "narrated" | "visual_aid". Defaulted so histories recorded before visual
+    # aids existed still deserialize on replay.
+    kind: str = "narrated"
 
 
 @dataclass
@@ -177,9 +180,11 @@ async def generate_visualizations_for_paper(params: PipelineInput) -> list[Rende
         # retried attempt resumes from them. Previous runs' rows stay visible
         # to readers until finalize_job supersedes them — a re-run no longer
         # blanks an already-visualized paper for 10-25 minutes.
+        # Narrated rows only (kind NULL = legacy narrated): aid rows from a
+        # retried run must never consume narrated slots.
         existing = [
             r for r in await queries.get_visualizations_for_paper(db, params.arxiv_id, since=run_started)
-            if r.manim_code
+            if r.manim_code and r.kind != "visual_aid"
         ]
         db_paper = await queries.get_paper(db, params.arxiv_id)
         if db_paper is None:
@@ -213,6 +218,7 @@ async def generate_visualizations_for_paper(params: PipelineInput) -> list[Rende
             storyboard={"raw": viz.storyboard},
             manim_code=viz.manim_code,
             session_maker=async_session_maker,
+            kind="narrated",
         )
         render_inputs.append(RenderInput(job_id=params.job_id, viz_id=viz_id, manim_code=viz.manim_code))
         activity.heartbeat(f"{len(render_inputs)} visualization(s) checkpointed")
@@ -260,6 +266,138 @@ async def generate_visualizations_for_paper(params: PipelineInput) -> list[Rende
 
 
 @activity.defn
+async def generate_visual_aids_for_paper(params: PipelineInput) -> list[RenderInput]:
+    """Generate silent looping visual aids; checkpoint each; return render inputs.
+
+    Same resume contract as the narrated activity but counted by kind: this
+    run's visual_aid rows are resumed and only the remaining aid slots are
+    filled. The flag is read here (never in the workflow) and an aid failure
+    of any kind is logged and swallowed: whatever was checkpointed is
+    returned, because aids must never fail an otherwise-good job.
+    """
+    import asyncio
+
+    from agents import pipeline
+    from db import queries
+    from db.connection import async_session_maker
+    from jobs.worker import _build_structured_paper_from_db
+
+    if not pipeline.ENABLE_VISUAL_AIDS:
+        return []
+
+    try:
+        from langfuse import propagate_attributes
+    except ImportError:  # pragma: no cover
+        from contextlib import nullcontext
+
+        def propagate_attributes(**_kw):  # type: ignore
+            return nullcontext()
+
+    paper_suffix = params.arxiv_id.replace(".", "_").replace("/", "_")
+    attempt = activity.info().attempt
+
+    async with async_session_maker() as db:
+        job = await queries.get_job(db, params.job_id)
+        run_started = job.created_at if job else None
+        run_rows = [
+            r for r in await queries.get_visualizations_for_paper(db, params.arxiv_id, since=run_started)
+            if r.manim_code
+        ]
+        db_paper = await queries.get_paper(db, params.arxiv_id)
+        if db_paper is None:
+            logger.warning("Paper %s is not stored; skipping visual aids", params.arxiv_id)
+            return []
+        db_sections = sorted(db_paper.sections, key=lambda s: s.order_index)
+        structured_paper = _build_structured_paper_from_db(db_paper, db_sections)
+
+    existing = [r for r in run_rows if r.kind == "visual_aid"]
+    narrated = [r for r in run_rows if r.kind != "visual_aid"]
+    render_inputs: list[RenderInput] = [
+        RenderInput(job_id=params.job_id, viz_id=r.id, manim_code=r.manim_code, kind="visual_aid")
+        for r in existing
+    ]
+    if existing:
+        logger.info("Attempt %d: resuming with %d checkpointed visual aid(s)", attempt, len(existing))
+    remaining = max(0, pipeline.MAX_VISUAL_AIDS - len(existing))
+
+    # The generator's per-section cap only sees this call, so on a resume it is
+    # re-applied here against the aids this run already checkpointed.
+    per_section: dict[str, int] = {}
+    for r in existing:
+        per_section[r.section_id] = per_section.get(r.section_id, 0) + 1
+
+    async def checkpoint(viz) -> None:
+        if per_section.get(viz.section_id, 0) >= pipeline.VISUAL_AIDS_PER_SECTION:
+            logger.info("Section %s already has its visual aid cap; dropping %r", viz.section_id, viz.concept)
+            return
+        try:
+            viz_id = await queries.insert_visualization_with_next_index(
+                paper_suffix=paper_suffix,
+                paper_id=params.arxiv_id,
+                section_id=viz.section_id,
+                concept=viz.concept,
+                storyboard={"raw": viz.storyboard},
+                manim_code=viz.manim_code,
+                session_maker=async_session_maker,
+                kind="visual_aid",
+                anchor_paragraph=viz.anchor_paragraph,
+            )
+        except Exception:
+            # One aid's failed insert drops just that aid (and keeps its slot);
+            # it must not abort the remaining aids of this attempt.
+            logger.exception("Could not checkpoint visual aid %r; dropping it", viz.concept)
+            return
+        per_section[viz.section_id] = per_section.get(viz.section_id, 0) + 1
+        render_inputs.append(
+            RenderInput(job_id=params.job_id, viz_id=viz_id, manim_code=viz.manim_code, kind="visual_aid")
+        )
+        activity.heartbeat(f"{len(render_inputs)} visual aid(s) checkpointed")
+
+    async def heartbeat_loop() -> None:
+        while True:
+            await asyncio.sleep(30)
+            activity.heartbeat(f"{len(render_inputs)} visual aid(s) checkpointed")
+
+    if remaining == 0:
+        logger.info("All %d visual aid slots already checkpointed; skipping generation", len(existing))
+    else:
+        beat = asyncio.create_task(heartbeat_loop())
+        try:
+            with propagate_attributes(
+                session_id=params.job_id,
+                trace_name="process-paper-visual-aids",
+                tags=["pipeline", "temporal", "visual-aids"],
+                metadata={"arxiv_id": params.arxiv_id},
+            ):
+                await pipeline.generate_visual_aids(
+                    structured_paper,
+                    skip_concepts={r.concept for r in narrated} | {r.concept for r in existing},
+                    max_total=remaining,
+                    on_visualization=checkpoint,
+                )
+        except Exception:
+            logger.exception(
+                "Visual aid generation failed; continuing with %d checkpointed aid(s)", len(render_inputs)
+            )
+        finally:
+            beat.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await beat
+
+    if render_inputs:
+        try:
+            # Progress counts every render, so the total now includes the aids.
+            async with async_session_maker() as db:
+                await queries.update_job_status(
+                    db, params.job_id,
+                    sections_total=len(narrated) + len(render_inputs),
+                )
+        except Exception:
+            logger.exception("Could not update progress total for visual aids")
+    return render_inputs
+
+
+@activity.defn
 async def render_visualization(params: RenderInput) -> RenderResult:
     """Render one video, judge it (when visual QA is on), record status.
 
@@ -289,6 +427,7 @@ async def render_visualization(params: RenderInput) -> RenderResult:
                 manim_code=params.manim_code,
                 quality="low_quality",
                 collect_qa=True,
+                kind=params.kind,
             )
             if verdict is not None:
                 severity = verdict.severity
@@ -298,6 +437,7 @@ async def render_visualization(params: RenderInput) -> RenderResult:
                 viz_id=params.viz_id,
                 manim_code=params.manim_code,
                 quality="low_quality",
+                kind=params.kind,
             )
     except Exception as exc:
         succeeded = False
@@ -326,6 +466,8 @@ async def render_visualization(params: RenderInput) -> RenderResult:
             and succeeded
             and severity == "major"
             and not params.is_repair
+            # Aids are never repaired (the repair contract preserves narration).
+            and params.kind != "visual_aid"
         ),
     )
 
@@ -434,9 +576,15 @@ async def update_render_progress(params: ProgressUpdate) -> None:
     from db.connection import async_session_maker
 
     async with async_session_maker() as db:
+        progress = 0.75 + 0.20 * (params.completed / max(1, params.total))
+        # The total can grow mid-render (visual aids join after narrated renders
+        # have started), which would shrink the fraction: never go backwards.
+        job = await queries.get_job(db, params.job_id)
+        if job is not None and job.progress is not None:
+            progress = max(progress, job.progress)
         await queries.update_job_status(
             db, params.job_id,
-            progress=0.75 + 0.20 * (params.completed / max(1, params.total)),
+            progress=progress,
             sections_completed=params.completed,
         )
 

@@ -12,6 +12,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from subprocess_env import scrubbed_env
+
 logger = logging.getLogger(__name__)
 
 
@@ -51,22 +53,30 @@ def _extract_render_error(stderr: str, stdout: str) -> str:
 def _tts_subprocess_env() -> dict[str, str]:
     """Environment for the render subprocess.
 
+    The subprocess executes LLM-generated code, so it starts from the
+    allowlisted ``scrubbed_env()``: app secrets are not inherited.
+
     manim-voiceover's OpenAIService talks to the module-level OpenAI client,
     which reads ``OPENAI_API_KEY`` / ``OPENAI_BASE_URL``. When those aren't
     already set but Azure OpenAI is configured, point them at Azure's
     OpenAI-compatible endpoint so voiceover audio bills against Azure credits.
     A pre-existing ``OPENAI_API_KEY`` (e.g. a real OpenAI key) is respected.
     """
-    env = dict(os.environ)
-    if not env.get("OPENAI_API_KEY"):
-        endpoint = env.get("AZURE_OPENAI_ENDPOINT", "").rstrip("/")
-        key = env.get("AZURE_OPENAI_API_KEY", "")
+    env = scrubbed_env()
+    preset_key = os.environ.get("OPENAI_API_KEY", "")
+    if preset_key:
+        env["OPENAI_API_KEY"] = preset_key
+        if os.environ.get("OPENAI_BASE_URL"):
+            env["OPENAI_BASE_URL"] = os.environ["OPENAI_BASE_URL"]
+    else:
+        endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT", "").rstrip("/")
+        key = os.environ.get("AZURE_OPENAI_API_KEY", "")
         if endpoint and key:
             env["OPENAI_API_KEY"] = key
             env["OPENAI_BASE_URL"] = f"{endpoint}/openai/v1/"
-            # Both OPENAI_* and AZURE_OPENAI_* are now present; the module-level
-            # OpenAI client refuses to guess between them. Pin it to the plain
-            # OpenAI code path — our base_url already targets the Azure endpoint.
+            # AZURE_OPENAI_* are not inherited, so the module-level client has
+            # no Azure settings to confuse with these; pin the plain OpenAI code
+            # path anyway — our base_url already targets the Azure endpoint.
             env["OPENAI_API_TYPE"] = "openai"
     return env
 

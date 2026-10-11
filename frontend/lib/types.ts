@@ -41,6 +41,17 @@ export type Section = {
   video_url?: string;
   viz_id?: string;
   videos?: SectionVideo[];
+  visual_aids?: SectionVisualAid[];
+};
+
+// Silent looping clip shown inline after the paragraph it illustrates.
+// paragraph_index indexes lib/paragraphs.ts splitParagraphs(section text);
+// null = no anchor (rendered after the text).
+export type SectionVisualAid = {
+  viz_id: string;
+  video_url: string;
+  concept: string;
+  paragraph_index: number | null;
 };
 
 export type SectionVideo = {

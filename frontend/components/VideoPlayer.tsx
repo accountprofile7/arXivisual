@@ -7,6 +7,7 @@ type Props = {
   title?: string;
   className?: string;
   autoPlay?: boolean;
+  loop?: boolean;
   pauseWhenInactive?: boolean;
   /** "none" for players in cards that aren't being read — every mounted
    *  card's videos used to fetch metadata and set up decoders at once. */
@@ -25,6 +26,7 @@ export function VideoPlayer({
   title = "Visualization video",
   className,
   autoPlay = false,
+  loop = false,
   pauseWhenInactive = false,
   preload = "metadata",
 }: Props) {
@@ -157,6 +159,7 @@ export function VideoPlayer({
         playsInline
         preload={preload}
         autoPlay={autoPlay}
+        loop={loop}
         muted={autoPlay}
         onPlay={() => setIsPlaying(true)}
         onPause={() => setIsPlaying(false)}

@@ -51,7 +51,7 @@ class TestWorkflowOrchestration:
     def calls(self):
         return {"ingest": 0, "generate": 0, "render": [], "progress": [], "finalize": [], "failed": 0}
 
-    def _mock_activities(self, calls, viz_count=3, fail_viz_ids=frozenset()):
+    def _mock_activities(self, calls, viz_count=3, fail_viz_ids=frozenset(), aid_count=0):
         from temporalio import activity
 
         @activity.defn(name="ingest_paper")
@@ -66,9 +66,21 @@ class TestWorkflowOrchestration:
                 for i in range(1, viz_count + 1)
             ]
 
+        @activity.defn(name="generate_visual_aids_for_paper")
+        async def aids(params: PipelineInput) -> list[RenderInput]:
+            calls["aid_calls"] = calls.get("aid_calls", 0) + 1
+            calls.setdefault("events", []).append("aid_start")
+            await asyncio.sleep(calls.get("aid_delay", 0))
+            calls["events"].append("aid_done")
+            return [
+                RenderInput(job_id=params.job_id, viz_id=f"aid_{i}", manim_code=f"acode{i}", kind="visual_aid")
+                for i in range(1, aid_count + 1)
+            ]
+
         @activity.defn(name="render_visualization")
         async def render(params: RenderInput) -> RenderResult:
             calls["render"].append(params.viz_id)
+            calls.setdefault("events", []).append(f"render:{params.viz_id}")
             return RenderResult(viz_id=params.viz_id, succeeded=params.viz_id not in fail_viz_ids)
 
         @activity.defn(name="update_render_progress")
@@ -83,13 +95,13 @@ class TestWorkflowOrchestration:
         async def failed(params: PipelineInput) -> None:
             calls["failed"] += 1
 
-        return [ingest, generate, progress, finalize, failed], [render]
+        return [ingest, generate, aids, progress, finalize, failed], [render]
 
-    async def _run(self, calls, viz_count=3, fail_viz_ids=frozenset()):
+    async def _run(self, calls, viz_count=3, fail_viz_ids=frozenset(), aid_count=0):
         from temporalio.testing import WorkflowEnvironment
         from temporalio.worker import Worker
 
-        pipeline_acts, render_acts = self._mock_activities(calls, viz_count, fail_viz_ids)
+        pipeline_acts, render_acts = self._mock_activities(calls, viz_count, fail_viz_ids, aid_count)
         async with await WorkflowEnvironment.start_local() as env, Worker(
             env.client, task_queue=TASK_QUEUE,
             workflows=[PaperPipelineWorkflow], activities=pipeline_acts,
@@ -125,6 +137,125 @@ class TestWorkflowOrchestration:
         assert result == "no-visualizations"
         assert calls["finalize"] == [(0, 0)]
         assert calls["render"] == []
+
+    def test_visual_aids_render_but_never_decide_the_outcome(self, calls):
+        result = asyncio.run(self._run(calls, viz_count=2, aid_count=2, fail_viz_ids=frozenset({"aid_1"})))
+        assert sorted(calls["render"]) == ["aid_1", "aid_2", "viz_1", "viz_2"]
+        # Progress counts every render; the terminal tally is narrated only.
+        assert [c for c, _ in calls["progress"]] == [1, 2, 3, 4]
+        totals = [t for _, t in calls["progress"]]
+        assert totals == sorted(totals) and totals[-1] == 4  # total grows as aids arrive
+        assert calls["finalize"] == [(2, 2)]
+        assert result == "rendered 2/2 (0 flagged, 0 repaired) + 1/2 visual aids"
+
+    def test_narrated_renders_start_before_slow_aid_generation_finishes(self, calls):
+        calls["aid_delay"] = 2
+        result = asyncio.run(self._run(calls, viz_count=2, aid_count=2))
+        ev = calls["events"]
+        # Both narrated renders ran while aid generation was still in flight.
+        assert ev.index("render:viz_1") < ev.index("aid_done")
+        assert ev.index("render:viz_2") < ev.index("aid_done")
+        assert ev.index("aid_done") < ev.index("render:aid_1")
+        # Progress never goes backwards or past the total, and ends complete.
+        done = [c for c, _ in calls["progress"]]
+        totals = [t for _, t in calls["progress"]]
+        assert done == [1, 2, 3, 4]
+        assert totals == sorted(totals) and all(c <= t for c, t in calls["progress"])
+        assert calls["progress"][-1] == (4, 4)
+        assert calls["finalize"] == [(2, 2)]
+        assert result == "rendered 2/2 (0 flagged, 0 repaired) + 2/2 visual aids"
+
+    def test_all_aids_failing_does_not_fail_the_job(self, calls):
+        asyncio.run(self._run(calls, viz_count=1, aid_count=2, fail_viz_ids=frozenset({"aid_1", "aid_2"})))
+        assert calls["finalize"] == [(1, 1)]
+        assert calls["failed"] == 0
+
+    def test_no_narrated_means_no_aid_generation(self, calls):
+        result = asyncio.run(self._run(calls, viz_count=0, aid_count=3))
+        assert result == "no-visualizations"
+        assert calls.get("aid_calls", 0) == 0
+        assert calls["finalize"] == [(0, 0)]
+
+    def test_aid_activity_failure_is_not_a_job_failure(self, calls):
+        from temporalio import activity
+        from temporalio.exceptions import ApplicationError
+
+        pipeline_acts, render_acts = self._mock_activities(calls, viz_count=2)
+
+        @activity.defn(name="generate_visual_aids_for_paper")
+        async def boom(params: PipelineInput) -> list[RenderInput]:
+            raise ApplicationError("aid generation exploded", non_retryable=True)
+
+        pipeline_acts = [
+            boom if getattr(a, "__temporal_activity_definition").name == "generate_visual_aids_for_paper" else a
+            for a in pipeline_acts
+        ]
+        result = asyncio.run(self._run_with(pipeline_acts, render_acts))
+        assert result == "rendered 2/2 (0 flagged, 0 repaired)"
+        assert calls["finalize"] == [(2, 2)] and calls["failed"] == 0
+
+    async def _run_with(self, pipeline_acts, render_acts):
+        from temporalio.testing import WorkflowEnvironment
+        from temporalio.worker import Worker
+
+        async with await WorkflowEnvironment.start_local() as env, Worker(
+            env.client, task_queue=TASK_QUEUE,
+            workflows=[PaperPipelineWorkflow], activities=pipeline_acts,
+        ), Worker(env.client, task_queue=RENDER_TASK_QUEUE, activities=render_acts):
+            return await env.client.execute_workflow(
+                PaperPipelineWorkflow.run,
+                PipelineInput(job_id="job_t", arxiv_id="1706.03762"),
+                id=f"paper-test-{uuid.uuid4().hex[:8]}",
+                task_queue=TASK_QUEUE,
+            )
+
+    def _history_of_run(self, calls, *, force_unpatched, aid_count=2):
+        from temporalio import workflow as tw
+        from temporalio.testing import WorkflowEnvironment
+        from temporalio.worker import Worker
+
+        pipeline_acts, render_acts = self._mock_activities(calls, viz_count=2, aid_count=aid_count)
+
+        async def go():
+            async with await WorkflowEnvironment.start_local() as env, Worker(
+                env.client, task_queue=TASK_QUEUE,
+                workflows=[PaperPipelineWorkflow], activities=pipeline_acts,
+            ), Worker(env.client, task_queue=RENDER_TASK_QUEUE, activities=render_acts):
+                handle = await env.client.start_workflow(
+                    PaperPipelineWorkflow.run,
+                    PipelineInput(job_id="job_t", arxiv_id="1706.03762"),
+                    id=f"paper-test-{uuid.uuid4().hex[:8]}",
+                    task_queue=TASK_QUEUE,
+                )
+                await handle.result()
+                return await handle.fetch_history()
+
+        if not force_unpatched:
+            return asyncio.run(go())
+        # Simulate a workflow started before the patch shipped: no marker is
+        # recorded and the legacy branch runs. (temporalio.workflow is passed
+        # through the sandbox, so this reaches the workflow's `workflow.patched`.)
+        orig = tw.patched
+        tw.patched = lambda _id: False
+        try:
+            return asyncio.run(go())
+        finally:
+            tw.patched = orig
+
+    def test_old_history_without_the_patch_replays_deterministically(self, calls):
+        from temporalio.worker import Replayer
+
+        history = self._history_of_run(calls, force_unpatched=True)
+        # The legacy branch really ran: no aid activity, 2 narrated renders only.
+        assert calls.get("aid_calls", 0) == 0 and sorted(calls["render"]) == ["viz_1", "viz_2"]
+        asyncio.run(Replayer(workflows=[PaperPipelineWorkflow]).replay_workflow(history))
+
+    def test_patched_history_replays_deterministically(self, calls):
+        from temporalio.worker import Replayer
+
+        history = self._history_of_run(calls, force_unpatched=False)
+        assert calls["aid_calls"] == 1 and "aid_1" in calls["render"]
+        asyncio.run(Replayer(workflows=[PaperPipelineWorkflow]).replay_workflow(history))
 
     def test_duplicate_workflow_id_is_rejected(self, calls):
         from temporalio.exceptions import WorkflowAlreadyStartedError
@@ -187,6 +318,10 @@ class TestRepairLoop:
                 for i in (1, 2)
             ]
 
+        @activity.defn(name="generate_visual_aids_for_paper")
+        async def aids(params: PipelineInput) -> list[RenderInput]:
+            return []
+
         @activity.defn(name="render_visualization")
         async def render(params: RenderInput) -> RenderResult:
             calls["renders"].append((params.viz_id, params.is_repair))
@@ -217,7 +352,7 @@ class TestRepairLoop:
         @activity.defn(name="mark_job_failed")
         async def failed(params: PipelineInput) -> None: ...
 
-        return [ingest, generate, progress, finalize, failed, repair], [render]
+        return [ingest, generate, aids, progress, finalize, failed, repair], [render]
 
     def _run(self, calls, **kw):
         from temporalio.testing import WorkflowEnvironment

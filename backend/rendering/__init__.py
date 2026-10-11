@@ -27,7 +27,19 @@ __all__ = [
     "render_manim",
     "render_manim_local",
     "save_video",
+    "visual_aid_render_quality",
 ]
+
+
+def visual_aid_render_quality() -> str:
+    """Render quality for silent visual aids (VISUAL_AID_RENDER_QUALITY, default low).
+
+    Accepts low|medium|high (with or without a ``_quality`` suffix); anything
+    else falls back to low_quality (-ql, 480p15) to keep aid renders cheap.
+    """
+    raw = os.getenv("VISUAL_AID_RENDER_QUALITY", "low").strip().lower()
+    name = raw if raw.endswith("_quality") else f"{raw}_quality"
+    return name if name in ("low_quality", "medium_quality", "high_quality") else "low_quality"
 
 
 async def render_manim(code: str, scene_name: str, quality: str = "low_quality") -> bytes:
@@ -62,6 +74,7 @@ async def process_visualization(
     manim_code: str,
     quality: str = "low_quality",
     collect_qa: bool = False,
+    kind: str = "narrated",
 ):
     """
     Process a visualization: render Manim code and save the video.
@@ -70,6 +83,8 @@ async def process_visualization(
         viz_id: Unique identifier for this visualization
         manim_code: Complete Manim Python code
         quality: Rendering quality ("low_quality", "medium_quality", "high_quality")
+        kind: "narrated" (default; ``quality`` is used as given) or "visual_aid",
+            which renders at ``visual_aid_render_quality()`` regardless of ``quality``.
         collect_qa: When True, run the visual QA judge INLINE and return
             ``(video_url, verdict)`` so the caller (the Temporal render
             activity) can drive a repair pass. When False (legacy path),
@@ -82,6 +97,8 @@ async def process_visualization(
     Raises:
         RuntimeError: If rendering fails
     """
+    if kind == "visual_aid":
+        quality = visual_aid_render_quality()
     logger.info(f"[Processing Visualization] {viz_id}")
     logger.info(f"[Processing Visualization] Quality setting: {quality}")
 

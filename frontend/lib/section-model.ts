@@ -6,6 +6,13 @@ export type SectionVideoModel = {
   concept: string;
 };
 
+export type SectionVisualAidModel = {
+  vizId: string;
+  videoUrl: string;
+  concept: string;
+  paragraphIndex: number | null;
+};
+
 export type ScrollySectionModel = {
   id: string;
   title: string;
@@ -15,4 +22,5 @@ export type ScrollySectionModel = {
   videoUrl?: string;
   vizId?: string;
   videos?: SectionVideoModel[];
+  visualAids?: SectionVisualAidModel[];
 };

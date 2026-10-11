@@ -4,7 +4,9 @@ import { memo, useMemo, useRef, useEffect, useCallback } from "react";
 import { motion, type MotionValue } from "framer-motion";
 import { VideoFeedback } from "@/components/VideoFeedback";
 import { VideoPlayer } from "@/components/VideoPlayer";
+import { VisualAid } from "@/components/VisualAid";
 import { MarkdownContent } from "@/components/MarkdownContent";
+import { splitParagraphs } from "@/lib/paragraphs";
 import { cn } from "@/lib/utils";
 
 // Merge equations that the summary references but does not inline.
@@ -56,6 +58,12 @@ interface StackCardProps {
     videoUrl?: string;
     vizId?: string;
     videos?: { vizId: string; videoUrl: string; concept: string }[];
+    visualAids?: {
+      vizId: string;
+      videoUrl: string;
+      concept: string;
+      paragraphIndex: number | null;
+    }[];
   };
   index: number;
   totalSections: number;
@@ -91,6 +99,30 @@ export const StackCard = memo(function StackCard({
     () => mergeContentWithEquations(section.content, section.equations),
     [section.content, section.equations]
   );
+
+  // Aids anchored to a paragraph render right after it; the rest (no anchor,
+  // or an index past the end) follow the text. Equations merged in above are
+  // only ever appended, so paragraph indexes of section.content stay valid.
+  const aidLayout = useMemo(() => {
+    const aids = section.visualAids ?? [];
+    if (aids.length === 0) return null;
+    const paragraphs = splitParagraphs(section.content);
+    const byParagraph = new Map<number, typeof aids>();
+    const trailing: typeof aids = [];
+    for (const aid of aids) {
+      const i = aid.paragraphIndex;
+      if (i === null || i < 0 || i >= paragraphs.length) {
+        trailing.push(aid);
+      } else {
+        byParagraph.set(i, [...(byParagraph.get(i) ?? []), aid]);
+      }
+    }
+    // Equations the summary references but does not inline come after the text.
+    const equationTail = mergeContentWithEquations(section.content, section.equations)
+      .slice(section.content.length)
+      .trim();
+    return { paragraphs, byParagraph, trailing, equationTail };
+  }, [section.content, section.equations, section.visualAids]);
 
   // Report content height for scroll calculation
   const reportHeight = useCallback(() => {
@@ -164,7 +196,34 @@ export const StackCard = memo(function StackCard({
 
           {/* Section content */}
           <div className="mt-6 text-base leading-[1.9] text-white/55 sm:text-[17px] sm:leading-[2]">
-            <MarkdownContent content={unifiedContent} />
+            {aidLayout ? (
+              <>
+                {aidLayout.paragraphs.map((paragraph, i) => (
+                  <div key={i} className="mb-6 last:mb-0">
+                    <MarkdownContent content={paragraph} />
+                    {aidLayout.byParagraph.get(i)?.map((aid) => (
+                      <VisualAid
+                        key={aid.vizId || aid.videoUrl}
+                        src={aid.videoUrl}
+                        concept={aid.concept}
+                        active={isActive}
+                      />
+                    ))}
+                  </div>
+                ))}
+                {aidLayout.equationTail && <MarkdownContent content={aidLayout.equationTail} />}
+                {aidLayout.trailing.map((aid) => (
+                  <VisualAid
+                    key={aid.vizId || aid.videoUrl}
+                    src={aid.videoUrl}
+                    concept={aid.concept}
+                    active={isActive}
+                  />
+                ))}
+              </>
+            ) : (
+              <MarkdownContent content={unifiedContent} />
+            )}
           </div>
 
           {/* Videos — every complete visualization for this section (newest

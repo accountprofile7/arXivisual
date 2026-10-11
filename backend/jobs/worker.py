@@ -28,6 +28,7 @@ def _langfuse_on() -> bool:
 
 
 import analytics
+from agents import pipeline
 from agents.pipeline import generate_visualizations
 from db import queries
 from db.connection import async_session_maker
@@ -46,6 +47,10 @@ from rendering import process_visualization
 from telemetry import detached_trace_context
 
 logger = logging.getLogger(__name__)
+
+# Visual-aid viz ids are viz_{suffix}_{AID_INDEX_OFFSET + n}, disjoint from the
+# narrated range (at most a handful per paper).
+AID_INDEX_OFFSET = 100
 
 
 def parse_render_concurrency(default: int = 3) -> int:
@@ -287,11 +292,57 @@ async def _process_paper_job_impl(job_id: str, arxiv_id: str):
                     storyboard={"raw": visualization.storyboard},
                     manim_code=visualization.manim_code,
                     status="pending",
+                    kind="narrated",
                 )
                 viz_records.append({
                     "id": viz_id,
                     "manim_code": visualization.manim_code,
+                    "kind": "narrated",
                 })
+
+            # Silent looping visual aids (flag read at call time). Aids never
+            # decide the job's outcome: with no narrated video the job fails as
+            # it always did (no aid spend), and an aid failure of any kind is
+            # logged and dropped.
+            narrated_total = len(viz_records)
+            if pipeline.ENABLE_VISUAL_AIDS and narrated_total:
+                try:
+                    aids = await pipeline.generate_visual_aids(
+                        structured_paper,
+                        skip_concepts=[v.concept for v in generated_visualizations],
+                    )
+                except Exception:
+                    logger.exception("Visual aid generation failed; continuing with narrated only")
+                    aids = []
+                logger.info(f"Generated {len(aids)} visual aid(s)")
+                for j, aid in enumerate(aids):
+                    # Aids use a disjoint index range: narrated ids are
+                    # viz_{suffix}_1..N (N <= 5 and varies per run), so
+                    # numbering aids after them would collide with, and
+                    # overwrite, a later run's narrated rows.
+                    viz_id = f"viz_{paper_suffix}_{AID_INDEX_OFFSET + j + 1}"
+                    try:
+                        await queries.upsert_visualization(
+                            db,
+                            viz_id=viz_id,
+                            paper_id=arxiv_id,
+                            section_id=aid.section_id,
+                            concept=aid.concept,
+                            storyboard={"raw": aid.storyboard},
+                            manim_code=aid.manim_code,
+                            status="pending",
+                            kind="visual_aid",
+                            anchor_paragraph=aid.anchor_paragraph,
+                        )
+                    except Exception:
+                        logger.exception(f"Failed to store visual aid {viz_id}; skipping")
+                        await db.rollback()
+                        continue
+                    viz_records.append({
+                        "id": viz_id,
+                        "manim_code": aid.manim_code,
+                        "kind": "visual_aid",
+                    })
 
             if not viz_records:
                 # The paper text is stored and readable, but the pipeline produced
@@ -341,9 +392,10 @@ async def _process_paper_job_impl(job_id: str, arxiv_id: str):
             progress_bar = ProgressBar(len(viz_records), "Video Rendering")
             completed_count = 0
             succeeded_count = 0
+            narrated_succeeded = 0
 
             async def _render_one(viz: dict, index: int):
-                nonlocal completed_count, succeeded_count
+                nonlocal completed_count, succeeded_count, narrated_succeeded
                 async with render_semaphore:
                     status = "complete"
                     video_url: str | None = None
@@ -354,6 +406,7 @@ async def _process_paper_job_impl(job_id: str, arxiv_id: str):
                             viz_id=viz["id"],
                             manim_code=viz["manim_code"],
                             quality="low_quality",
+                            kind=viz.get("kind", "narrated"),
                         )
                         logger.info(f"✓ Successfully rendered {viz['id']}")
                     except Exception as e:
@@ -378,6 +431,8 @@ async def _process_paper_job_impl(job_id: str, arxiv_id: str):
                             completed_count += 1
                             if status == "complete":
                                 succeeded_count += 1
+                                if viz.get("kind", "narrated") == "narrated":
+                                    narrated_succeeded += 1
                             progress_bar.update()
                             render_progress = 0.75 + (0.20 * (completed_count / len(viz_records)))
                             await queries.update_job_status(
@@ -410,8 +465,10 @@ async def _process_paper_job_impl(job_id: str, arxiv_id: str):
             logger.info("STEP 4: Finalizing job")
             logger.info("=" * 60)
 
+            # Terminal status is decided by the narrated videos alone: failed
+            # visual aids never fail a job that would otherwise succeed.
             status, step, error = resolve_terminal_job_status(
-                succeeded_count, len(viz_records)
+                narrated_succeeded, narrated_total
             )
             await queries.update_job_status(
                 db, job_id,
@@ -423,7 +480,7 @@ async def _process_paper_job_impl(job_id: str, arxiv_id: str):
             # Product event (paper_completed / paper_failed_server); never raises.
             analytics.job_outcome(
                 job_id=job_id, arxiv_id=arxiv_id, status=status,
-                videos_complete=succeeded_count, videos_total=len(viz_records),
+                videos_complete=narrated_succeeded, videos_total=narrated_total,
                 created_at=started_at, error=error,
             )
 

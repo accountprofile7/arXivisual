@@ -78,6 +78,8 @@ class GateMetrics:
 
     def hook(self, gate: str, attempt: int, passed: bool) -> None:
         """Signature-compatible with ``agents.pipeline.metrics_hook``."""
+        if gate.startswith("aid:"):
+            return  # silent visual aids are not narrated visualizations
         trace = self._current.get()
         if trace is None or (gate == CODE_GATE and attempt == 0):
             trace = VizTrace()

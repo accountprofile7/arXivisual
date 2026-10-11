@@ -266,6 +266,45 @@ def normalize_display_text(text: str | None, *, from_organizer: bool = True) -> 
     return t.strip()
 
 
+def split_paragraphs(text: str | None) -> list[str]:
+    """Display paragraphs: blank-line separated, never splitting inside a ``$$``
+    display-math block or a code fence. Visual aids anchor to an index in this
+    list; frontend/lib/paragraphs.ts mirrors the rule, so keep them in sync."""
+    if not text:
+        return []
+    paragraphs, unclosed = _split_blocks(text, track_blocks=True)
+    if unclosed:
+        # A stray $$ or an unclosed fence would merge every later paragraph into
+        # one; fall back to plain blank-line splitting so anchors stay usable.
+        paragraphs, _ = _split_blocks(text, track_blocks=False)
+    return paragraphs
+
+
+def _split_blocks(text: str, *, track_blocks: bool) -> tuple[list[str], bool]:
+    paragraphs: list[str] = []
+    current: list[str] = []
+    in_math = in_code = False
+    for line in text.replace("\r\n", "\n").split("\n"):
+        stripped = line.strip()
+        if not stripped and not in_math and not in_code:
+            if current:
+                paragraphs.append("\n".join(current).strip())
+                current = []
+            continue
+        current.append(line)
+        if not track_blocks:
+            continue
+        if stripped.startswith("```"):
+            in_code = not in_code
+        elif not in_code:
+            # An odd number of $$ on a line opens or closes a display block.
+            if stripped.count("$$") % 2 == 1:
+                in_math = not in_math
+    if current:
+        paragraphs.append("\n".join(current).strip())
+    return [p for p in paragraphs if p], in_math or in_code
+
+
 # ---------------------------------------------------------------------------
 # 6. Plain-text titles
 # ---------------------------------------------------------------------------

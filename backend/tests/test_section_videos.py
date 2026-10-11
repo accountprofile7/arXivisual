@@ -101,3 +101,53 @@ async def test_superseded_rows_never_reach_the_api(client, db):
     assert [v["viz_id"] for v in sec["videos"]] == ["viz_1706_03762_2"]
     assert sec["video_url"] == "https://x/new.mp4"
     assert "viz_1706_03762_1" not in {v["id"] for v in body["visualizations"]}
+
+
+async def _seed_with_aids(db):
+    db.add(Paper(id="2609.00001", title="Aids", authors=["A"]))
+    sec, other = "2609.00001-section-1", "2609.00001-section-2"
+    db.add(Section(id=sec, paper_id="2609.00001", title="Method", content="word " * 500, order_index=0))
+    db.add(Section(id=other, paper_id="2609.00001", title="Results", content="word " * 500, order_index=1))
+    db.add(Visualization(id="viz_2609_00001_1", paper_id="2609.00001", section_id=sec,
+                         concept="Narrated", status="complete", video_url="https://x/n.mp4",
+                         created_at=datetime(2026, 10, 1, 10)))  # kind NULL = narrated (old row)
+    db.add(Visualization(id="viz_2609_00001_101", paper_id="2609.00001", section_id=sec,
+                         concept="Aid two", status="complete", video_url="https://x/a2.mp4",
+                         kind="visual_aid", anchor_paragraph=2, created_at=datetime(2026, 10, 1, 12)))
+    db.add(Visualization(id="viz_2609_00001_102", paper_id="2609.00001", section_id=sec,
+                         concept="Aid zero", status="complete", video_url="https://x/a0.mp4",
+                         kind="visual_aid", anchor_paragraph=0, created_at=datetime(2026, 10, 1, 11)))
+    db.add(Visualization(id="viz_2609_00001_103", paper_id="2609.00001", section_id=sec,
+                         concept="Aid pending", status="pending", kind="visual_aid", anchor_paragraph=1))
+    db.add(Visualization(id="viz_2609_00001_104", paper_id="2609.00001", section_id=other,
+                         concept="Aid only section", status="complete", video_url="https://x/a3.mp4",
+                         kind="visual_aid", anchor_paragraph=None))
+    await db.commit()
+
+
+async def test_visual_aids_are_separate_from_narrated_videos(client, db):
+    await _seed_with_aids(db)
+    body = (await client.get("/api/paper/2609.00001")).json()
+    sec, other = body["sections"]
+
+    assert [v["viz_id"] for v in sec["videos"]] == ["viz_2609_00001_1"]
+    assert sec["video_url"] == "https://x/n.mp4"
+    # Complete aids only, in paragraph order; the pending aid is absent.
+    assert sec["visual_aids"] == [
+        {"viz_id": "viz_2609_00001_102", "video_url": "https://x/a0.mp4",
+         "concept": "Aid zero", "paragraph_index": 0},
+        {"viz_id": "viz_2609_00001_101", "video_url": "https://x/a2.mp4",
+         "concept": "Aid two", "paragraph_index": 2},
+    ]
+    assert other["videos"] == [] and other["video_url"] is None
+    assert other["visual_aids"][0]["paragraph_index"] is None
+
+    kinds = {v["id"]: v["kind"] for v in body["visualizations"]}
+    assert kinds["viz_2609_00001_1"] == "narrated"
+    assert kinds["viz_2609_00001_101"] == "visual_aid"
+
+
+async def test_gallery_counts_only_narrated_sections(db):
+    await _seed_with_aids(db)
+    (row,) = [r for r in await queries.list_paper_summaries(db) if r["paper_id"] == "2609.00001"]
+    assert row["playable_sections"] == 1  # the aid-only section is not counted

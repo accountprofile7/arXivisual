@@ -137,6 +137,18 @@ class SectionVideo(BaseModel):
     concept: str
 
 
+class SectionVisualAid(BaseModel):
+    """A short silent looping clip shown inline after one paragraph of a section."""
+    viz_id: str
+    video_url: str
+    concept: str
+    paragraph_index: int | None = Field(
+        None,
+        description="Index into the section's display paragraphs (split on blank lines, "
+                    "never inside $$ or code blocks); null or out of range = after the text",
+    )
+
+
 class SectionResponse(BaseModel):
     """Section data within a paper."""
     id: str
@@ -152,6 +164,11 @@ class SectionResponse(BaseModel):
         description="ALL complete videos for this section, newest first — the pipeline routinely "
                     "assigns several concepts to one section and 22% of rendered videos were never shown",
     )
+    visual_aids: list[SectionVisualAid] = Field(
+        default_factory=list,
+        description="Complete silent visual aids for this section, in paragraph order "
+                    "(never included in `videos` or `video_url`)",
+    )
 
 
 class VisualizationResponse(BaseModel):
@@ -161,6 +178,7 @@ class VisualizationResponse(BaseModel):
     concept: str = Field(..., description="Human-readable concept being visualized")
     video_url: str | None = Field(None, description="URL to rendered video, null if not ready")
     status: VisualizationStatus
+    kind: str = Field("narrated", description="'narrated' or 'visual_aid'")
 
 
 class PaperResponse(BaseModel):
