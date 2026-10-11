@@ -423,14 +423,14 @@ def test_prompts_assign_the_corner_roles_when_on(monkeypatch):
     assert "TL holds ONE analogy for the WHOLE concept" in gen
     assert "BL holds ONE analogy for one step of the mechanism across 2-4 phrases" in gen
     assert "BR stays EMPTY: no icon, no inset, no recap" in gen
-    assert "the TL preview 2, BL 2-4, " in gen and "the TL recap 2." in gen
+    assert "the TL preview 2, BL 2-4, the TL recap 2" in gen
     assert "The TL preview has nothing to pulse" in gen
     assert "TL REGROW for the recap is the settle in reverse" in gen
     assert "never reuse the faded-out ones" in gen
     assert "FadeIn(card2, *new_parts, target_position=corner_anchor(UL), scale=0.35)" in gen
     assert "part.animate.scale(1 / s).move_to(home)" in gen
     assert "so the video ends with the TL icon at rest" in gen
-    assert "Corner analogies carry no tags" in gen
+    assert "Corner analogies and TR pictograms carry no tags" in gen
     assert "LaggedStart(*[Indicate(p) for p in parts], lag_ratio=0.3)" in gen
     assert "never one `Indicate` on the whole diagram" in gen
     assert "for at most 1 second, with no voiceover block of its own" in gen
@@ -440,7 +440,7 @@ def test_prompts_assign_the_corner_roles_when_on(monkeypatch):
     assert "the TL, TR and BL icons sit at the edges and BR stays empty" in gen
     assert "Grids of cells or dots (`arrange_in_grid`) may pack tighter" in gen
     # The planner's scene contract the marker print and the run checks rely on.
-    assert 'MUST start with "VISUAL AID: " and its corner tag, (TL), (TR) or (BL)' in plan
+    assert 'MUST start with "VISUAL AID: " and its corner tag, (TL) or (BL)' in plan
     assert "the TL preview and TL recap scenes are shorter: 2 phrases each" in plan
     assert "the TL recap highlights the finished diagram part by part, from input to output" in plan
     assert "draws the real input shape itself, right after the TL preview settles" in plan
@@ -451,24 +451,28 @@ def test_prompts_assign_the_corner_roles_when_on(monkeypatch):
 
 
 def test_tr_corner_role_when_on(monkeypatch):
-    # Variant (b): one passage inset of 3-4 phrases on another step, never per-phrase pictograms.
+    # Variant (a): a tiny pictogram per phrase inside the TR corner box, never an inset.
+    ns = _snippet_constants()
+    pic_w, pic_h = round(ns["CORNER_W"] - 0.4, 2), round(ns["CORNER_H"] - 0.4, 2)  # 0.2 margin all round
     monkeypatch.setenv("VISUAL_NARRATION", "1")
     plan = _planner_prompt(_planner())
-    assert "### 3. TR corner: one passage inset" in plan
-    assert 'There is EXACTLY one (TR) moment: one scene whose description starts with "VISUAL AID: (TR)"' in plan
-    assert "a different step of the mechanism than the (BL) moment" in plan
-    assert "its inset stays open for 3-4 consecutive phrases and the analogy changes on every one of them" in plan
-    assert "It is not in the scene next to the (BL) moment" in plan
-    assert "may come in either order, both between the (TL) preview and the (TL) recap" in plan
-    assert "Only the scenes named in sections 2 and 3 start with" in plan
+    assert "### 3. TR corner: one tiny pictogram per phrase" in plan
+    assert "written inside the beat as a note that starts with TR:" in plan
+    assert 'TR never grows into an inset and has no "VISUAL AID: " scene' in plan
+    assert "When the TL recap begins, the last pictogram shrinks to the TR resting icon" in plan
+    assert "until the TL recap begins, every center-stage beat, including the beats while the BL inset is open" in plan
+    assert "Write TR notes without double quote characters, since the plan is JSON" in plan
     gen = _narrated(_generator())
-    assert "TR CORNER, one passage inset" in gen
-    assert "FadeIn(card, analogy, target_position=corner_anchor(UR), scale=0.35)" in gen
-    assert "the TL preview 2, BL 2-4, TR 3-4, the TL recap 2" in gen
-    assert "The TR corner is empty before the passage and holds only its resting icon after it" in gen
-    # Variant (a) is gone.
-    for stale in ("pictogram", "TR: note", "TR notes", "2.6 x 1.1"):
-        assert stale not in plan and stale not in gen, stale
+    assert "TR CORNER, one tiny pictogram per phrase" in gen
+    assert "draws the plan's TR: note in the TR corner box, in the SAME `self.play` as that phrase's center change" in gen
+    assert f"a shapes-only sketch of at most {pic_w} x {pic_h}" in gen
+    assert "`VGroup(...).arrange(..., buff=0.3).move_to(corner_anchor(UR))` with no numeric offsets" in gen
+    assert "TR keeps changing while the BL inset is open" in gen
+    assert "TR never grows a card or an inset" in gen
+    assert "pic.animate.scale(icon_scale(pic)).move_to(corner_anchor(UR))" in gen
+    assert "every part at least 0.25 across" in gen
+    assert "from the first center-stage phrase after the TL preview until the TL recap begins" in gen
+    assert "and a TR pictogram when the next one replaces it" in gen
 
 
 # Assertions spliced into the snippet: they run inside construct() under the dry run.
