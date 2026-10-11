@@ -15,7 +15,6 @@ PLANNER_ANCHOR = "## Output Format (JSON only)"
 GENERATOR_ANCHOR = "## Output Contract"
 
 VISUAL_AID_MARKER = "VISUAL AID:"
-VISUAL_AID_MOMENTS = 3
 
 
 def visual_narration_enabled() -> bool:

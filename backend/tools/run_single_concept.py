@@ -204,7 +204,8 @@ async def run(args: argparse.Namespace, out_dir: Path, viz_id: str) -> int:
     code_path = out_dir / f"{viz_id}.py"
     code_path.write_text(viz.manim_code, encoding="utf-8")
     (out_dir / f"{viz_id}.plan.json").write_text(json.dumps(plan, indent=2), encoding="utf-8")
-    print(f"\nCode: {code_path}\nPlan ({len(aid_scenes)} VISUAL AID scenes, expected 3):")
+    corners = ", ".join(s["description"][len(VISUAL_AID_MARKER):].strip()[:4] for s in aid_scenes)
+    print(f"\nCode: {code_path}\nPlan ({len(aid_scenes)} VISUAL AID scenes: {corners or 'none'}):")
     print(json.dumps(plan, indent=2))
 
     # viz was never persisted; rendering reuses only the id as the output file name.
